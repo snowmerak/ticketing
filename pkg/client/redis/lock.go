@@ -27,12 +27,20 @@ func (l *Lock) Acquire(ctx context.Context, key string, expiration time.Duration
 	lockKey := "lock:" + key
 
 	// Try to set the lock with NX (only if not exists) and EX (expiration)
-	result, err := l.client.rdb.SetNX(ctx, lockKey, "1", expiration).Result()
+	cmd := l.client.rdb.B().Set().Key(lockKey).Value("1").Nx().Ex(expiration).Build()
+	result := l.client.rdb.Do(ctx, cmd)
+
+	if result.Error() != nil {
+		return false, result.Error()
+	}
+
+	// Check if the SET operation was successful (key was set)
+	resultStr, err := result.ToString()
 	if err != nil {
 		return false, err
 	}
 
-	return result, nil
+	return resultStr == "OK", nil
 }
 
 // Release releases a lock
@@ -48,7 +56,8 @@ func (l *Lock) Release(ctx context.Context, key string) error {
 		end
 	`
 
-	return l.client.rdb.Eval(ctx, script, []string{lockKey}).Err()
+	cmd := l.client.rdb.B().Eval().Script(script).Numkeys(1).Key(lockKey).Build()
+	return l.client.rdb.Do(ctx, cmd).Error()
 }
 
 // Extend extends the expiration time of a lock
@@ -64,17 +73,20 @@ func (l *Lock) Extend(ctx context.Context, key string, expiration time.Duration)
 		end
 	`
 
-	return l.client.rdb.Eval(ctx, script, []string{lockKey}, int(expiration.Seconds())).Err()
+	cmd := l.client.rdb.B().Eval().Script(script).Numkeys(1).Key(lockKey).Arg(string(rune(int(expiration.Seconds())))).Build()
+	return l.client.rdb.Do(ctx, cmd).Error()
 }
 
 // IsLocked checks if a key is locked
 func (l *Lock) IsLocked(ctx context.Context, key string) (bool, error) {
 	lockKey := "lock:" + key
 
-	result, err := l.client.rdb.Exists(ctx, lockKey).Result()
-	if err != nil {
-		return false, err
+	cmd := l.client.rdb.B().Exists().Key(lockKey).Build()
+	result := l.client.rdb.Do(ctx, cmd)
+	if result.Error() != nil {
+		return false, result.Error()
 	}
 
-	return result > 0, nil
+	count, err := result.ToInt64()
+	return count > 0, err
 }

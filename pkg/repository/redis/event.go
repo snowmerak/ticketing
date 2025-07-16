@@ -40,19 +40,22 @@ func (r *EventRepository) Create(ctx context.Context, event *domain.Event) error
 	key := fmt.Sprintf("event:%s", event.ID.String())
 
 	// Set the event data
-	if err := r.client.GetRedisClient().Set(ctx, key, data, 0).Err(); err != nil {
+	cmd := r.client.GetRedisClient().B().Set().Key(key).Value(string(data)).Build()
+	if err := r.client.GetRedisClient().Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("failed to create event: %w", err)
 	}
 
 	// Add to active events index if active
 	if event.Status == string(domain.EventStatusActive) {
-		if err := r.client.GetRedisClient().SAdd(ctx, "events:active", event.ID.String()).Err(); err != nil {
+		addCmd := r.client.GetRedisClient().B().Sadd().Key("events:active").Member(event.ID.String()).Build()
+		if err := r.client.GetRedisClient().Do(ctx, addCmd).Error(); err != nil {
 			return fmt.Errorf("failed to add to active events: %w", err)
 		}
 	}
 
 	// Add to all events index
-	if err := r.client.GetRedisClient().SAdd(ctx, "events:all", event.ID.String()).Err(); err != nil {
+	allCmd := r.client.GetRedisClient().B().Sadd().Key("events:all").Member(event.ID.String()).Build()
+	if err := r.client.GetRedisClient().Do(ctx, allCmd).Error(); err != nil {
 		return fmt.Errorf("failed to add to all events: %w", err)
 	}
 
@@ -63,9 +66,15 @@ func (r *EventRepository) Create(ctx context.Context, event *domain.Event) error
 func (r *EventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
 	key := fmt.Sprintf("event:%s", id.String())
 
-	data, err := r.client.GetRedisClient().Get(ctx, key).Result()
+	cmd := r.client.GetRedisClient().B().Get().Key(key).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get event: %w", result.Error())
+	}
+
+	data, err := result.ToString()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get event: %w", err)
+		return nil, fmt.Errorf("failed to get event data: %w", err)
 	}
 
 	var event domain.Event
@@ -88,17 +97,20 @@ func (r *EventRepository) Update(ctx context.Context, event *domain.Event) error
 	key := fmt.Sprintf("event:%s", event.ID.String())
 
 	// Update the event data
-	if err := r.client.GetRedisClient().Set(ctx, key, data, 0).Err(); err != nil {
+	cmd := r.client.GetRedisClient().B().Set().Key(key).Value(string(data)).Build()
+	if err := r.client.GetRedisClient().Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("failed to update event: %w", err)
 	}
 
 	// Update active events index
 	if event.Status == string(domain.EventStatusActive) {
-		if err := r.client.GetRedisClient().SAdd(ctx, "events:active", event.ID.String()).Err(); err != nil {
+		addCmd := r.client.GetRedisClient().B().Sadd().Key("events:active").Member(event.ID.String()).Build()
+		if err := r.client.GetRedisClient().Do(ctx, addCmd).Error(); err != nil {
 			return fmt.Errorf("failed to add to active events: %w", err)
 		}
 	} else {
-		if err := r.client.GetRedisClient().SRem(ctx, "events:active", event.ID.String()).Err(); err != nil {
+		remCmd := r.client.GetRedisClient().B().Srem().Key("events:active").Member(event.ID.String()).Build()
+		if err := r.client.GetRedisClient().Do(ctx, remCmd).Error(); err != nil {
 			return fmt.Errorf("failed to remove from active events: %w", err)
 		}
 	}
@@ -111,17 +123,20 @@ func (r *EventRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	key := fmt.Sprintf("event:%s", id.String())
 
 	// Remove from Redis
-	if err := r.client.GetRedisClient().Del(ctx, key).Err(); err != nil {
+	delCmd := r.client.GetRedisClient().B().Del().Key(key).Build()
+	if err := r.client.GetRedisClient().Do(ctx, delCmd).Error(); err != nil {
 		return fmt.Errorf("failed to delete event: %w", err)
 	}
 
 	// Remove from indexes
 	idStr := id.String()
-	if err := r.client.GetRedisClient().SRem(ctx, "events:all", idStr).Err(); err != nil {
+	allRemCmd := r.client.GetRedisClient().B().Srem().Key("events:all").Member(idStr).Build()
+	if err := r.client.GetRedisClient().Do(ctx, allRemCmd).Error(); err != nil {
 		return fmt.Errorf("failed to remove from all events: %w", err)
 	}
 
-	if err := r.client.GetRedisClient().SRem(ctx, "events:active", idStr).Err(); err != nil {
+	activeRemCmd := r.client.GetRedisClient().B().Srem().Key("events:active").Member(idStr).Build()
+	if err := r.client.GetRedisClient().Do(ctx, activeRemCmd).Error(); err != nil {
 		return fmt.Errorf("failed to remove from active events: %w", err)
 	}
 
@@ -130,9 +145,15 @@ func (r *EventRepository) Delete(ctx context.Context, id uuid.UUID) error {
 
 // List retrieves all events with pagination
 func (r *EventRepository) List(ctx context.Context, offset, limit int) ([]*domain.Event, error) {
-	members, err := r.client.GetRedisClient().SMembers(ctx, "events:all").Result()
+	cmd := r.client.GetRedisClient().B().Smembers().Key("events:all").Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get all events: %w", result.Error())
+	}
+
+	members, err := result.AsStrSlice()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get all events: %w", err)
+		return nil, fmt.Errorf("failed to parse members: %w", err)
 	}
 
 	var events []*domain.Event
@@ -166,9 +187,15 @@ func (r *EventRepository) List(ctx context.Context, offset, limit int) ([]*domai
 
 // GetActiveEvents retrieves all active events
 func (r *EventRepository) GetActiveEvents(ctx context.Context) ([]*domain.Event, error) {
-	members, err := r.client.GetRedisClient().SMembers(ctx, "events:active").Result()
+	cmd := r.client.GetRedisClient().B().Smembers().Key("events:active").Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get active events: %w", result.Error())
+	}
+
+	members, err := result.AsStrSlice()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get active events: %w", err)
+		return nil, fmt.Errorf("failed to parse members: %w", err)
 	}
 
 	var events []*domain.Event
@@ -224,16 +251,22 @@ func (r *EventRepository) DecrementAvailableTickets(ctx context.Context, eventID
 		return newVal
 	`
 
-	result, err := r.client.GetRedisClient().Eval(ctx, script, []string{key}, count).Result()
-	if err != nil {
-		return fmt.Errorf("failed to decrement available tickets: %w", err)
+	cmd := r.client.GetRedisClient().B().Eval().Script(script).Numkeys(1).Key(key).Arg(fmt.Sprintf("%d", count)).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return fmt.Errorf("failed to decrement available tickets: %w", result.Error())
 	}
 
-	if result == -1 {
+	resultVal, err := result.ToInt64()
+	if err != nil {
+		return fmt.Errorf("failed to parse result: %w", err)
+	}
+
+	if resultVal == -1 {
 		return fmt.Errorf("event not found")
 	}
 
-	if result == -2 {
+	if resultVal == -2 {
 		return fmt.Errorf("insufficient tickets available")
 	}
 
@@ -243,7 +276,7 @@ func (r *EventRepository) DecrementAvailableTickets(ctx context.Context, eventID
 		return fmt.Errorf("failed to get event: %w", err)
 	}
 
-	event.AvailableTickets = int(result.(int64))
+	event.AvailableTickets = int(resultVal)
 
 	return r.Update(ctx, event)
 }
@@ -267,12 +300,18 @@ func (r *EventRepository) IncrementAvailableTickets(ctx context.Context, eventID
 		return newVal
 	`
 
-	result, err := r.client.GetRedisClient().Eval(ctx, script, []string{key}, count).Result()
-	if err != nil {
-		return fmt.Errorf("failed to increment available tickets: %w", err)
+	cmd := r.client.GetRedisClient().B().Eval().Script(script).Numkeys(1).Key(key).Arg(fmt.Sprintf("%d", count)).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return fmt.Errorf("failed to increment available tickets: %w", result.Error())
 	}
 
-	if result == -1 {
+	resultVal, err := result.ToInt64()
+	if err != nil {
+		return fmt.Errorf("failed to parse result: %w", err)
+	}
+
+	if resultVal == -1 {
 		return fmt.Errorf("event not found")
 	}
 
@@ -282,7 +321,7 @@ func (r *EventRepository) IncrementAvailableTickets(ctx context.Context, eventID
 		return fmt.Errorf("failed to get event: %w", err)
 	}
 
-	event.AvailableTickets = int(result.(int64))
+	event.AvailableTickets = int(resultVal)
 
 	return r.Update(ctx, event)
 }

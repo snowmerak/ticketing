@@ -40,26 +40,30 @@ func (r *SeatRepository) Create(ctx context.Context, seat *domain.Seat) error {
 	key := fmt.Sprintf("seat:%s", seat.ID.String())
 
 	// Set the seat data
-	if err := r.client.GetRedisClient().Set(ctx, key, data, 0).Err(); err != nil {
+	cmd := r.client.GetRedisClient().B().Set().Key(key).Value(string(data)).Build()
+	if err := r.client.GetRedisClient().Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("failed to create seat: %w", err)
 	}
 
 	// Add to event seats index
 	eventSeatsKey := fmt.Sprintf("event_seats:%s", seat.EventID.String())
-	if err := r.client.GetRedisClient().SAdd(ctx, eventSeatsKey, seat.ID.String()).Err(); err != nil {
+	saddCmd := r.client.GetRedisClient().B().Sadd().Key(eventSeatsKey).Member(seat.ID.String()).Build()
+	if err := r.client.GetRedisClient().Do(ctx, saddCmd).Error(); err != nil {
 		return fmt.Errorf("failed to add to event seats: %w", err)
 	}
 
 	// Add to section index
-	sectionKey := fmt.Sprintf("event_seats:%s:section:%s", seat.EventID.String(), seat.Section)
-	if err := r.client.GetRedisClient().SAdd(ctx, sectionKey, seat.ID.String()).Err(); err != nil {
+	sectionKey := fmt.Sprintf("section:%s:%s", seat.EventID.String(), seat.Section)
+	sectionCmd := r.client.GetRedisClient().B().Sadd().Key(sectionKey).Member(seat.ID.String()).Build()
+	if err := r.client.GetRedisClient().Do(ctx, sectionCmd).Error(); err != nil {
 		return fmt.Errorf("failed to add to section: %w", err)
 	}
 
 	// Add to available seats if available
-	if seat.IsAvailable() {
-		availableKey := fmt.Sprintf("event_seats:%s:available", seat.EventID.String())
-		if err := r.client.GetRedisClient().SAdd(ctx, availableKey, seat.ID.String()).Err(); err != nil {
+	if seat.Status == string(domain.SeatStatusAvailable) {
+		availableKey := fmt.Sprintf("available_seats:%s", seat.EventID.String())
+		availableCmd := r.client.GetRedisClient().B().Sadd().Key(availableKey).Member(seat.ID.String()).Build()
+		if err := r.client.GetRedisClient().Do(ctx, availableCmd).Error(); err != nil {
 			return fmt.Errorf("failed to add to available seats: %w", err)
 		}
 	}
@@ -73,37 +77,11 @@ func (r *SeatRepository) CreateBatch(ctx context.Context, seats []*domain.Seat) 
 		return nil
 	}
 
-	pipe := r.client.GetRedisClient().Pipeline()
-
+	// Create all seats individually for simplicity
 	for _, seat := range seats {
-		seat.CreatedAt = time.Now()
-		seat.UpdatedAt = time.Now()
-
-		data, err := json.Marshal(seat)
-		if err != nil {
-			return fmt.Errorf("failed to marshal seat: %w", err)
+		if err := r.Create(ctx, seat); err != nil {
+			return fmt.Errorf("failed to create seat %s: %w", seat.ID.String(), err)
 		}
-
-		key := fmt.Sprintf("seat:%s", seat.ID.String())
-		pipe.Set(ctx, key, data, 0)
-
-		// Add to event seats index
-		eventSeatsKey := fmt.Sprintf("event_seats:%s", seat.EventID.String())
-		pipe.SAdd(ctx, eventSeatsKey, seat.ID.String())
-
-		// Add to section index
-		sectionKey := fmt.Sprintf("event_seats:%s:section:%s", seat.EventID.String(), seat.Section)
-		pipe.SAdd(ctx, sectionKey, seat.ID.String())
-
-		// Add to available seats if available
-		if seat.IsAvailable() {
-			availableKey := fmt.Sprintf("event_seats:%s:available", seat.EventID.String())
-			pipe.SAdd(ctx, availableKey, seat.ID.String())
-		}
-	}
-
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to create seats batch: %w", err)
 	}
 
 	return nil
@@ -113,9 +91,15 @@ func (r *SeatRepository) CreateBatch(ctx context.Context, seats []*domain.Seat) 
 func (r *SeatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Seat, error) {
 	key := fmt.Sprintf("seat:%s", id.String())
 
-	data, err := r.client.GetRedisClient().Get(ctx, key).Result()
+	cmd := r.client.GetRedisClient().B().Get().Key(key).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get seat: %w", result.Error())
+	}
+
+	data, err := result.ToString()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get seat: %w", err)
+		return nil, fmt.Errorf("failed to get seat data: %w", err)
 	}
 
 	var seat domain.Seat
@@ -130,9 +114,15 @@ func (r *SeatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Sea
 func (r *SeatRepository) GetByEventID(ctx context.Context, eventID uuid.UUID) ([]*domain.Seat, error) {
 	eventSeatsKey := fmt.Sprintf("event_seats:%s", eventID.String())
 
-	members, err := r.client.GetRedisClient().SMembers(ctx, eventSeatsKey).Result()
+	cmd := r.client.GetRedisClient().B().Smembers().Key(eventSeatsKey).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get event seats: %w", result.Error())
+	}
+
+	members, err := result.AsStrSlice()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get event seats: %w", err)
+		return nil, fmt.Errorf("failed to parse members: %w", err)
 	}
 
 	var seats []*domain.Seat
@@ -155,11 +145,17 @@ func (r *SeatRepository) GetByEventID(ctx context.Context, eventID uuid.UUID) ([
 
 // GetAvailableByEventID retrieves available seats for an event
 func (r *SeatRepository) GetAvailableByEventID(ctx context.Context, eventID uuid.UUID) ([]*domain.Seat, error) {
-	availableKey := fmt.Sprintf("event_seats:%s:available", eventID.String())
+	availableKey := fmt.Sprintf("available_seats:%s", eventID.String())
 
-	members, err := r.client.GetRedisClient().SMembers(ctx, availableKey).Result()
+	cmd := r.client.GetRedisClient().B().Smembers().Key(availableKey).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get available seats: %w", result.Error())
+	}
+
+	members, err := result.AsStrSlice()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get available seats: %w", err)
+		return nil, fmt.Errorf("failed to parse members: %w", err)
 	}
 
 	var seats []*domain.Seat
@@ -182,11 +178,17 @@ func (r *SeatRepository) GetAvailableByEventID(ctx context.Context, eventID uuid
 
 // GetBySection retrieves seats by section
 func (r *SeatRepository) GetBySection(ctx context.Context, eventID uuid.UUID, section string) ([]*domain.Seat, error) {
-	sectionKey := fmt.Sprintf("event_seats:%s:section:%s", eventID.String(), section)
+	sectionKey := fmt.Sprintf("section:%s:%s", eventID.String(), section)
 
-	members, err := r.client.GetRedisClient().SMembers(ctx, sectionKey).Result()
+	cmd := r.client.GetRedisClient().B().Smembers().Key(sectionKey).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get section seats: %w", result.Error())
+	}
+
+	members, err := result.AsStrSlice()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get section seats: %w", err)
+		return nil, fmt.Errorf("failed to parse members: %w", err)
 	}
 
 	var seats []*domain.Seat
@@ -218,7 +220,9 @@ func (r *SeatRepository) Update(ctx context.Context, seat *domain.Seat) error {
 
 	key := fmt.Sprintf("seat:%s", seat.ID.String())
 
-	if err := r.client.GetRedisClient().Set(ctx, key, data, 0).Err(); err != nil {
+	// Update the seat data
+	cmd := r.client.GetRedisClient().B().Set().Key(key).Value(string(data)).Build()
+	if err := r.client.GetRedisClient().Do(ctx, cmd).Error(); err != nil {
 		return fmt.Errorf("failed to update seat: %w", err)
 	}
 
@@ -235,27 +239,24 @@ func (r *SeatRepository) UpdateStatus(ctx context.Context, seatID uuid.UUID, sta
 	oldStatus := seat.Status
 	seat.Status = status
 
-	// Update the seat
-	if err := r.Update(ctx, seat); err != nil {
-		return fmt.Errorf("failed to update seat: %w", err)
-	}
-
-	// Update availability index
-	availableKey := fmt.Sprintf("event_seats:%s:available", seat.EventID.String())
+	// Update available seats index
+	availableKey := fmt.Sprintf("available_seats:%s", seat.EventID.String())
 
 	if oldStatus == string(domain.SeatStatusAvailable) && status != string(domain.SeatStatusAvailable) {
-		// Remove from available
-		if err := r.client.GetRedisClient().SRem(ctx, availableKey, seatID.String()).Err(); err != nil {
+		// Remove from available seats
+		remCmd := r.client.GetRedisClient().B().Srem().Key(availableKey).Member(seatID.String()).Build()
+		if err := r.client.GetRedisClient().Do(ctx, remCmd).Error(); err != nil {
 			return fmt.Errorf("failed to remove from available seats: %w", err)
 		}
 	} else if oldStatus != string(domain.SeatStatusAvailable) && status == string(domain.SeatStatusAvailable) {
-		// Add to available
-		if err := r.client.GetRedisClient().SAdd(ctx, availableKey, seatID.String()).Err(); err != nil {
+		// Add to available seats
+		addCmd := r.client.GetRedisClient().B().Sadd().Key(availableKey).Member(seatID.String()).Build()
+		if err := r.client.GetRedisClient().Do(ctx, addCmd).Error(); err != nil {
 			return fmt.Errorf("failed to add to available seats: %w", err)
 		}
 	}
 
-	return nil
+	return r.Update(ctx, seat)
 }
 
 // ReserveSeats reserves multiple seats atomically
@@ -266,42 +267,49 @@ func (r *SeatRepository) ReserveSeats(ctx context.Context, seatIDs []uuid.UUID) 
 		for i, seatKey in ipairs(KEYS) do
 			local seatData = redis.call('GET', seatKey)
 			if seatData == false then
-				return {err = "seat not found: " .. seatKey}
+				return 'seat_not_found'
 			end
 			
 			local seat = cjson.decode(seatData)
-			if seat.status ~= "available" then
-				return {err = "seat not available: " .. seatKey}
+			if seat.status ~= 'available' then
+				return 'seat_not_available'
 			end
 			
-			seat.status = "reserved"
+			seat.status = 'reserved'
 			seat.updated_at = ARGV[1]
-			
-			redis.call('SET', seatKey, cjson.encode(seat))
-			redis.call('SREM', 'event_seats:' .. seat.event_id .. ':available', seat.id)
-			
-			table.insert(seats, seat)
+			seats[i] = {key = seatKey, data = cjson.encode(seat), id = seat.id, event_id = seat.event_id}
 		end
 		
-		return {ok = "reserved " .. #seats .. " seats"}
+		for i, seat in ipairs(seats) do
+			redis.call('SET', seat.key, seat.data)
+			redis.call('SREM', 'available_seats:' .. seat.event_id, seat.id)
+		end
+		
+		return 'success'
 	`
 
-	keys := make([]string, len(seatIDs))
-	for i, id := range seatIDs {
-		keys[i] = fmt.Sprintf("seat:%s", id.String())
+	var keys []string
+	for _, seatID := range seatIDs {
+		keys = append(keys, fmt.Sprintf("seat:%s", seatID.String()))
 	}
 
-	args := []interface{}{time.Now().Format(time.RFC3339)}
+	now := time.Now().Format(time.RFC3339)
+	cmd := r.client.GetRedisClient().B().Eval().Script(script).Numkeys(int64(len(keys))).Key(keys...).Arg(now).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return fmt.Errorf("failed to reserve seats: %w", result.Error())
+	}
 
-	result, err := r.client.GetRedisClient().Eval(ctx, script, keys, args...).Result()
+	resultStr, err := result.ToString()
 	if err != nil {
-		return fmt.Errorf("failed to reserve seats: %w", err)
+		return fmt.Errorf("failed to get result: %w", err)
 	}
 
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		if errMsg, exists := resultMap["err"]; exists {
-			return fmt.Errorf("reservation failed: %v", errMsg)
-		}
+	if resultStr == "seat_not_found" {
+		return fmt.Errorf("one or more seats not found")
+	}
+	if resultStr == "seat_not_available" {
+		return fmt.Errorf("one or more seats not available")
 	}
 
 	return nil
@@ -315,42 +323,49 @@ func (r *SeatRepository) ReleaseSeats(ctx context.Context, seatIDs []uuid.UUID) 
 		for i, seatKey in ipairs(KEYS) do
 			local seatData = redis.call('GET', seatKey)
 			if seatData == false then
-				return {err = "seat not found: " .. seatKey}
+				return 'seat_not_found'
 			end
 			
 			local seat = cjson.decode(seatData)
-			if seat.status ~= "reserved" then
-				return {err = "seat not reserved: " .. seatKey}
+			if seat.status ~= 'reserved' then
+				return 'seat_not_reserved'
 			end
 			
-			seat.status = "available"
+			seat.status = 'available'
 			seat.updated_at = ARGV[1]
-			
-			redis.call('SET', seatKey, cjson.encode(seat))
-			redis.call('SADD', 'event_seats:' .. seat.event_id .. ':available', seat.id)
-			
-			table.insert(seats, seat)
+			seats[i] = {key = seatKey, data = cjson.encode(seat), id = seat.id, event_id = seat.event_id}
 		end
 		
-		return {ok = "released " .. #seats .. " seats"}
+		for i, seat in ipairs(seats) do
+			redis.call('SET', seat.key, seat.data)
+			redis.call('SADD', 'available_seats:' .. seat.event_id, seat.id)
+		end
+		
+		return 'success'
 	`
 
-	keys := make([]string, len(seatIDs))
-	for i, id := range seatIDs {
-		keys[i] = fmt.Sprintf("seat:%s", id.String())
+	var keys []string
+	for _, seatID := range seatIDs {
+		keys = append(keys, fmt.Sprintf("seat:%s", seatID.String()))
 	}
 
-	args := []interface{}{time.Now().Format(time.RFC3339)}
+	now := time.Now().Format(time.RFC3339)
+	cmd := r.client.GetRedisClient().B().Eval().Script(script).Numkeys(int64(len(keys))).Key(keys...).Arg(now).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return fmt.Errorf("failed to release seats: %w", result.Error())
+	}
 
-	result, err := r.client.GetRedisClient().Eval(ctx, script, keys, args...).Result()
+	resultStr, err := result.ToString()
 	if err != nil {
-		return fmt.Errorf("failed to release seats: %w", err)
+		return fmt.Errorf("failed to get result: %w", err)
 	}
 
-	if resultMap, ok := result.(map[string]interface{}); ok {
-		if errMsg, exists := resultMap["err"]; exists {
-			return fmt.Errorf("release failed: %v", errMsg)
-		}
+	if resultStr == "seat_not_found" {
+		return fmt.Errorf("one or more seats not found")
+	}
+	if resultStr == "seat_not_reserved" {
+		return fmt.Errorf("one or more seats not reserved")
 	}
 
 	return nil
@@ -366,23 +381,29 @@ func (r *SeatRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	key := fmt.Sprintf("seat:%s", id.String())
 
 	// Remove from Redis
-	if err := r.client.GetRedisClient().Del(ctx, key).Err(); err != nil {
+	delCmd := r.client.GetRedisClient().B().Del().Key(key).Build()
+	if err := r.client.GetRedisClient().Do(ctx, delCmd).Error(); err != nil {
 		return fmt.Errorf("failed to delete seat: %w", err)
 	}
 
 	// Remove from indexes
 	idStr := id.String()
 	eventSeatsKey := fmt.Sprintf("event_seats:%s", seat.EventID.String())
-	sectionKey := fmt.Sprintf("event_seats:%s:section:%s", seat.EventID.String(), seat.Section)
-	availableKey := fmt.Sprintf("event_seats:%s:available", seat.EventID.String())
+	eventRemCmd := r.client.GetRedisClient().B().Srem().Key(eventSeatsKey).Member(idStr).Build()
+	if err := r.client.GetRedisClient().Do(ctx, eventRemCmd).Error(); err != nil {
+		return fmt.Errorf("failed to remove from event seats: %w", err)
+	}
 
-	pipe := r.client.GetRedisClient().Pipeline()
-	pipe.SRem(ctx, eventSeatsKey, idStr)
-	pipe.SRem(ctx, sectionKey, idStr)
-	pipe.SRem(ctx, availableKey, idStr)
+	sectionKey := fmt.Sprintf("section:%s:%s", seat.EventID.String(), seat.Section)
+	sectionRemCmd := r.client.GetRedisClient().B().Srem().Key(sectionKey).Member(idStr).Build()
+	if err := r.client.GetRedisClient().Do(ctx, sectionRemCmd).Error(); err != nil {
+		return fmt.Errorf("failed to remove from section: %w", err)
+	}
 
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to remove from indexes: %w", err)
+	availableKey := fmt.Sprintf("available_seats:%s", seat.EventID.String())
+	availableRemCmd := r.client.GetRedisClient().B().Srem().Key(availableKey).Member(idStr).Build()
+	if err := r.client.GetRedisClient().Do(ctx, availableRemCmd).Error(); err != nil {
+		return fmt.Errorf("failed to remove from available seats: %w", err)
 	}
 
 	return nil
@@ -395,37 +416,10 @@ func (r *SeatRepository) DeleteByEventID(ctx context.Context, eventID uuid.UUID)
 		return fmt.Errorf("failed to get event seats: %w", err)
 	}
 
-	if len(seats) == 0 {
-		return nil
-	}
-
-	pipe := r.client.GetRedisClient().Pipeline()
-
 	for _, seat := range seats {
-		key := fmt.Sprintf("seat:%s", seat.ID.String())
-		pipe.Del(ctx, key)
-	}
-
-	// Remove indexes
-	eventSeatsKey := fmt.Sprintf("event_seats:%s", eventID.String())
-	availableKey := fmt.Sprintf("event_seats:%s:available", eventID.String())
-
-	pipe.Del(ctx, eventSeatsKey)
-	pipe.Del(ctx, availableKey)
-
-	// Remove section indexes (this is a simplified approach)
-	sections := make(map[string]bool)
-	for _, seat := range seats {
-		sections[seat.Section] = true
-	}
-
-	for section := range sections {
-		sectionKey := fmt.Sprintf("event_seats:%s:section:%s", eventID.String(), section)
-		pipe.Del(ctx, sectionKey)
-	}
-
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to delete event seats: %w", err)
+		if err := r.Delete(ctx, seat.ID); err != nil {
+			return fmt.Errorf("failed to delete seat %s: %w", seat.ID.String(), err)
+		}
 	}
 
 	return nil

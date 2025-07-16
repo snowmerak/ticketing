@@ -39,9 +39,15 @@ func (r *QueueRepository) Join(ctx context.Context, eventID, userID uuid.UUID, s
 	entryKey := fmt.Sprintf("queue_entry:%s:%s", eventID.String(), userID.String())
 
 	// Get current queue length to determine position
-	length, err := r.client.GetRedisClient().LLen(ctx, queueKey).Result()
+	lenCmd := r.client.GetRedisClient().B().Llen().Key(queueKey).Build()
+	lenResult := r.client.GetRedisClient().Do(ctx, lenCmd)
+	if lenResult.Error() != nil {
+		return nil, fmt.Errorf("failed to get queue length: %w", lenResult.Error())
+	}
+
+	length, err := lenResult.ToInt64()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get queue length: %w", err)
+		return nil, fmt.Errorf("failed to parse queue length: %w", err)
 	}
 
 	entry := &domain.QueueEntry{
@@ -71,13 +77,19 @@ func (r *QueueRepository) Join(ctx context.Context, eventID, userID uuid.UUID, s
 	}
 
 	// Add to queue and store entry data
-	pipe := r.client.GetRedisClient().Pipeline()
-	pipe.RPush(ctx, queueKey, userID.String())
-	pipe.Set(ctx, entryKey, data, 0)
-	pipe.HSet(ctx, fmt.Sprintf("session:%s", sessionID), "queue_entry", entryKey)
+	rpushCmd := r.client.GetRedisClient().B().Rpush().Key(queueKey).Element(userID.String()).Build()
+	if err := r.client.GetRedisClient().Do(ctx, rpushCmd).Error(); err != nil {
+		return nil, fmt.Errorf("failed to add to queue: %w", err)
+	}
 
-	if _, err := pipe.Exec(ctx); err != nil {
-		return nil, fmt.Errorf("failed to join queue: %w", err)
+	setCmd := r.client.GetRedisClient().B().Set().Key(entryKey).Value(string(data)).Build()
+	if err := r.client.GetRedisClient().Do(ctx, setCmd).Error(); err != nil {
+		return nil, fmt.Errorf("failed to set entry data: %w", err)
+	}
+
+	hsetCmd := r.client.GetRedisClient().B().Hset().Key(fmt.Sprintf("session:%s", sessionID)).FieldValue().FieldValue("queue_entry", entryKey).Build()
+	if err := r.client.GetRedisClient().Do(ctx, hsetCmd).Error(); err != nil {
+		return nil, fmt.Errorf("failed to set session data: %w", err)
 	}
 
 	return entry, nil
@@ -87,9 +99,15 @@ func (r *QueueRepository) Join(ctx context.Context, eventID, userID uuid.UUID, s
 func (r *QueueRepository) GetPosition(ctx context.Context, eventID, userID uuid.UUID) (*domain.QueueEntry, error) {
 	entryKey := fmt.Sprintf("queue_entry:%s:%s", eventID.String(), userID.String())
 
-	data, err := r.client.GetRedisClient().Get(ctx, entryKey).Result()
+	cmd := r.client.GetRedisClient().B().Get().Key(entryKey).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get queue entry: %w", result.Error())
+	}
+
+	data, err := result.ToString()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get queue entry: %w", err)
+		return nil, fmt.Errorf("failed to get entry data: %w", err)
 	}
 
 	var entry domain.QueueEntry
@@ -102,14 +120,26 @@ func (r *QueueRepository) GetPosition(ctx context.Context, eventID, userID uuid.
 
 // GetBySessionID retrieves queue entry by session ID
 func (r *QueueRepository) GetBySessionID(ctx context.Context, sessionID string) (*domain.QueueEntry, error) {
-	entryKey, err := r.client.GetRedisClient().HGet(ctx, fmt.Sprintf("session:%s", sessionID), "queue_entry").Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get queue entry key: %w", err)
+	hgetCmd := r.client.GetRedisClient().B().Hget().Key(fmt.Sprintf("session:%s", sessionID)).Field("queue_entry").Build()
+	result := r.client.GetRedisClient().Do(ctx, hgetCmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get queue entry key: %w", result.Error())
 	}
 
-	data, err := r.client.GetRedisClient().Get(ctx, entryKey).Result()
+	entryKey, err := result.ToString()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get queue entry: %w", err)
+		return nil, fmt.Errorf("failed to get entry key: %w", err)
+	}
+
+	getCmd := r.client.GetRedisClient().B().Get().Key(entryKey).Build()
+	getResult := r.client.GetRedisClient().Do(ctx, getCmd)
+	if getResult.Error() != nil {
+		return nil, fmt.Errorf("failed to get queue entry: %w", getResult.Error())
+	}
+
+	data, err := getResult.ToString()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get entry data: %w", err)
 	}
 
 	var entry domain.QueueEntry
@@ -125,9 +155,15 @@ func (r *QueueRepository) GetNextInQueue(ctx context.Context, eventID uuid.UUID)
 	queueKey := fmt.Sprintf("queue:%s", eventID.String())
 
 	// Get the first user in queue
-	userID, err := r.client.GetRedisClient().LIndex(ctx, queueKey, 0).Result()
+	cmd := r.client.GetRedisClient().B().Lindex().Key(queueKey).Index(0).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get next in queue: %w", result.Error())
+	}
+
+	userID, err := result.ToString()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get next in queue: %w", err)
+		return nil, fmt.Errorf("failed to get user ID: %w", err)
 	}
 
 	userUUID, err := uuid.Parse(userID)
@@ -142,9 +178,15 @@ func (r *QueueRepository) GetNextInQueue(ctx context.Context, eventID uuid.UUID)
 func (r *QueueRepository) GetQueueLength(ctx context.Context, eventID uuid.UUID) (int, error) {
 	queueKey := fmt.Sprintf("queue:%s", eventID.String())
 
-	length, err := r.client.GetRedisClient().LLen(ctx, queueKey).Result()
+	cmd := r.client.GetRedisClient().B().Llen().Key(queueKey).Build()
+	result := r.client.GetRedisClient().Do(ctx, cmd)
+	if result.Error() != nil {
+		return 0, fmt.Errorf("failed to get queue length: %w", result.Error())
+	}
+
+	length, err := result.ToInt64()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get queue length: %w", err)
+		return 0, fmt.Errorf("failed to parse queue length: %w", err)
 	}
 
 	return int(length), nil
@@ -162,15 +204,21 @@ func (r *QueueRepository) ActivateNext(ctx context.Context, eventID uuid.UUID) (
 	queueKey := fmt.Sprintf("queue:%s", eventID.String())
 
 	// Remove the current first user and get the next one
-	_, err := r.client.GetRedisClient().LPop(ctx, queueKey).Result()
-	if err != nil {
+	lpopCmd := r.client.GetRedisClient().B().Lpop().Key(queueKey).Build()
+	if err := r.client.GetRedisClient().Do(ctx, lpopCmd).Error(); err != nil {
 		return nil, fmt.Errorf("failed to remove current user from queue: %w", err)
 	}
 
 	// Get the new first user
-	userID, err := r.client.GetRedisClient().LIndex(ctx, queueKey, 0).Result()
+	lindexCmd := r.client.GetRedisClient().B().Lindex().Key(queueKey).Index(0).Build()
+	result := r.client.GetRedisClient().Do(ctx, lindexCmd)
+	if result.Error() != nil {
+		return nil, fmt.Errorf("failed to get next user: %w", result.Error())
+	}
+
+	userID, err := result.ToString()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get next user: %w", err)
+		return nil, fmt.Errorf("failed to get user ID: %w", err)
 	}
 
 	userUUID, err := uuid.Parse(userID)
@@ -197,7 +245,8 @@ func (r *QueueRepository) ActivateNext(ctx context.Context, eventID uuid.UUID) (
 		return nil, fmt.Errorf("failed to marshal queue entry: %w", err)
 	}
 
-	if err := r.client.GetRedisClient().Set(ctx, entryKey, data, 0).Err(); err != nil {
+	setCmd := r.client.GetRedisClient().B().Set().Key(entryKey).Value(string(data)).Build()
+	if err := r.client.GetRedisClient().Do(ctx, setCmd).Error(); err != nil {
 		return nil, fmt.Errorf("failed to update queue entry: %w", err)
 	}
 
