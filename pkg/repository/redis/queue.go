@@ -99,8 +99,9 @@ func (r *QueueRepository) Join(ctx context.Context, eventID, userID uuid.UUID, s
 func (r *QueueRepository) GetPosition(ctx context.Context, eventID, userID uuid.UUID) (*domain.QueueEntry, error) {
 	entryKey := fmt.Sprintf("queue_entry:%s:%s", eventID.String(), userID.String())
 
-	cmd := r.client.GetRedisClient().B().Get().Key(entryKey).Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 1 * time.Minute // short TTL for queue position (frequently changing)
+	cmd := r.client.GetRedisClient().B().Get().Key(entryKey).Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get queue entry: %w", result.Error())
 	}
@@ -131,8 +132,9 @@ func (r *QueueRepository) GetBySessionID(ctx context.Context, sessionID string) 
 		return nil, fmt.Errorf("failed to get entry key: %w", err)
 	}
 
-	getCmd := r.client.GetRedisClient().B().Get().Key(entryKey).Build()
-	getResult := r.client.GetRedisClient().Do(ctx, getCmd)
+	const clientSideCacheTTL = 1 * time.Minute // short TTL for queue entry
+	getCmd := r.client.GetRedisClient().B().Get().Key(entryKey).Cache()
+	getResult := r.client.GetRedisClient().DoCache(ctx, getCmd, clientSideCacheTTL)
 	if getResult.Error() != nil {
 		return nil, fmt.Errorf("failed to get queue entry: %w", getResult.Error())
 	}

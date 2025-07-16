@@ -91,8 +91,9 @@ func (r *SeatRepository) CreateBatch(ctx context.Context, seats []*domain.Seat) 
 func (r *SeatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Seat, error) {
 	key := fmt.Sprintf("seat:%s", id.String())
 
-	cmd := r.client.GetRedisClient().B().Get().Key(key).Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 30 * time.Minute // moderate TTL for seat data
+	cmd := r.client.GetRedisClient().B().Get().Key(key).Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get seat: %w", result.Error())
 	}
@@ -114,8 +115,9 @@ func (r *SeatRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Sea
 func (r *SeatRepository) GetByEventID(ctx context.Context, eventID uuid.UUID) ([]*domain.Seat, error) {
 	eventSeatsKey := fmt.Sprintf("event_seats:%s", eventID.String())
 
-	cmd := r.client.GetRedisClient().B().Smembers().Key(eventSeatsKey).Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 10 * time.Minute // shorter TTL for seat lists
+	cmd := r.client.GetRedisClient().B().Smembers().Key(eventSeatsKey).Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get event seats: %w", result.Error())
 	}

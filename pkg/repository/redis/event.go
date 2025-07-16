@@ -66,8 +66,9 @@ func (r *EventRepository) Create(ctx context.Context, event *domain.Event) error
 func (r *EventRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Event, error) {
 	key := fmt.Sprintf("event:%s", id.String())
 
-	cmd := r.client.GetRedisClient().B().Get().Key(key).Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 1 * time.Hour
+	cmd := r.client.GetRedisClient().B().Get().Key(key).Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get event: %w", result.Error())
 	}
@@ -145,8 +146,9 @@ func (r *EventRepository) Delete(ctx context.Context, id uuid.UUID) error {
 
 // List retrieves all events with pagination
 func (r *EventRepository) List(ctx context.Context, offset, limit int) ([]*domain.Event, error) {
-	cmd := r.client.GetRedisClient().B().Smembers().Key("events:all").Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 2 * time.Minute // shorter TTL for events list
+	cmd := r.client.GetRedisClient().B().Smembers().Key("events:all").Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get all events: %w", result.Error())
 	}
@@ -187,8 +189,9 @@ func (r *EventRepository) List(ctx context.Context, offset, limit int) ([]*domai
 
 // GetActiveEvents retrieves all active events
 func (r *EventRepository) GetActiveEvents(ctx context.Context) ([]*domain.Event, error) {
-	cmd := r.client.GetRedisClient().B().Smembers().Key("events:active").Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 5 * time.Minute // shorter TTL for active events list
+	cmd := r.client.GetRedisClient().B().Smembers().Key("events:active").Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get active events: %w", result.Error())
 	}

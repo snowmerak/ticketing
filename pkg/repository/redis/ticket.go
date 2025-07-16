@@ -84,8 +84,9 @@ func (r *TicketRepository) Create(ctx context.Context, ticket *domain.Ticket) er
 func (r *TicketRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Ticket, error) {
 	key := fmt.Sprintf("ticket:%s", id.String())
 
-	cmd := r.client.GetRedisClient().B().Get().Key(key).Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 15 * time.Minute // moderate TTL for ticket data
+	cmd := r.client.GetRedisClient().B().Get().Key(key).Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get ticket: %w", result.Error())
 	}
@@ -107,8 +108,9 @@ func (r *TicketRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.T
 func (r *TicketRepository) GetByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.Ticket, error) {
 	userTicketsKey := fmt.Sprintf("user_tickets:%s", userID.String())
 
-	cmd := r.client.GetRedisClient().B().Smembers().Key(userTicketsKey).Build()
-	result := r.client.GetRedisClient().Do(ctx, cmd)
+	const clientSideCacheTTL = 5 * time.Minute // shorter TTL for user ticket lists
+	cmd := r.client.GetRedisClient().B().Smembers().Key(userTicketsKey).Cache()
+	result := r.client.GetRedisClient().DoCache(ctx, cmd, clientSideCacheTTL)
 	if result.Error() != nil {
 		return nil, fmt.Errorf("failed to get user tickets: %w", result.Error())
 	}
