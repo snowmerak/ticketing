@@ -112,6 +112,30 @@ func (s *EventService) GetActiveEvents(ctx context.Context) ([]*domain.Event, er
 	return events, nil
 }
 
+// GetAllEvents retrieves all events with pagination
+func (s *EventService) GetAllEvents(ctx context.Context) ([]*domain.Event, error) {
+	// Try cache first
+	cacheKey := "events:all"
+	if cached, err := s.cache.Get(ctx, cacheKey); err == nil {
+		if events, ok := cached.([]*domain.Event); ok {
+			return events, nil
+		}
+	}
+
+	events, err := s.eventRepo.List(ctx, 0, 100) // Get first 100 events
+	if err != nil {
+		s.logger.Error(ctx, "Failed to get all events", "error", err)
+		return nil, fmt.Errorf("failed to get all events: %w", err)
+	}
+
+	// Cache for 2 minutes
+	if err := s.cache.Set(ctx, cacheKey, events, 2*time.Minute); err != nil {
+		s.logger.Warn(ctx, "Failed to cache all events", "error", err)
+	}
+
+	return events, nil
+}
+
 // UpdateEvent updates an existing event
 func (s *EventService) UpdateEvent(ctx context.Context, event *domain.Event) error {
 	s.logger.Info(ctx, "Updating event", "event_id", event.ID)

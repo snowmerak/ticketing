@@ -90,9 +90,13 @@ func (c *EventController) CreateEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	response := map[string]interface{}{
+		"event": event,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(event)
+	json.NewEncoder(w).Encode(response)
 }
 
 // GetEvent handles GET /events/{id}
@@ -129,8 +133,31 @@ func (c *EventController) GetActiveEvents(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	response := map[string]interface{}{
+		"events": events,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(events)
+	json.NewEncoder(w).Encode(response)
+}
+
+// GetAllEvents handles GET /events
+func (c *EventController) GetAllEvents(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	events, err := c.eventService.GetAllEvents(ctx)
+	if err != nil {
+		c.logger.Error(ctx, "Failed to get all events", "error", err)
+		http.Error(w, "Failed to get events", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"events": events,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 // UpdateEventRequest represents the request body for updating an event
@@ -320,6 +347,7 @@ func (c *EventController) GetAvailableSeats(w http.ResponseWriter, r *http.Reque
 // RegisterRoutes registers all event routes
 func (c *EventController) RegisterRoutes(router *mux.Router) {
 	router.HandleFunc("/events", c.CreateEvent).Methods("POST")
+	router.HandleFunc("/events", c.GetAllEvents).Methods("GET")
 	router.HandleFunc("/events/active", c.GetActiveEvents).Methods("GET")
 	router.HandleFunc("/events/{id}", c.GetEvent).Methods("GET")
 	router.HandleFunc("/events/{id}", c.UpdateEvent).Methods("PUT")
