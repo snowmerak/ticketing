@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ticketing-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - ticketing-network
+
+  ticketing-server:
+    build:
+      context: .
+      dockerfile: cmd/ticketing-server/Dockerfile
+    container_name: ticketing-server
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=
+      - REDIS_DB=0
+    networks:
+      - ticketing-network
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+
+networks:
+  ticketing-network:
+    driver: bridge
