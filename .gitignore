@@ -1,1 +1,6 @@
 .q
+.env
+bin/
+coverage.out
+test-results/
+benchmark-results/
