@@ -39,7 +39,7 @@ flowchart LR
 |---|---|---|
 | HTTP API | 개발용 subject 수신, ticket/permit 검증, hold·confirm 진입점, health·request count | [server.go](../internal/httpapi/server.go) |
 | Redis queue store + Lua | 이벤트별 epoch, sequence, READY, capacity/rate, grant, booking permit의 원자 전이 | [store.go](../internal/queue/store.go), [Lua](../redis/lua) |
-| 티켓 서명기 + 키 Redis 어댑터 | 인스턴스 메모리 개인키로 Ed25519 서명, 공개키 등록·조회, `kid` 검증·회전 | [signer.go](../internal/ticket/signer.go), [registry.go](../internal/keyredis/registry.go) |
+| 티켓 서명기 + 키 Redis 어댑터 | 인스턴스의 `memguard` 보호 버퍼에 개인키를 보관해 Ed25519 서명, 공개키 등록·조회, `kid` 검증·회전 | [signer.go](../internal/ticket/signer.go), [registry.go](../internal/keyredis/registry.go) |
 | Admission worker | MySQL 가용성 확인, 이벤트별 lease/fence 획득, READY 후보 claim, grant/booking 회수·통계 갱신 | [worker.go](../internal/queue/worker.go) |
 | MySQL booking store | 좌석 잠금, hold·취소·확정, 사용자별 구매 제약, 만료 처리 | [store.go](../internal/booking/store.go) |
 | Seat cache | MySQL 재고의 약 1초 주기 메모리 snapshot; 최종 판매 판정에는 사용하지 않음 | [cache.go](../internal/booking/cache.go) |
@@ -72,7 +72,7 @@ Redis와 MySQL 사이에 분산 트랜잭션은 없다. Redis에서 입장 권�
 
 ## 시작·장애·복구 경계
 
-`migrate`는 MySQL schema/seed를 적용하고, `init-state`는 대기열 Redis installation marker와 이벤트 control을 명시적으로 초기화한다. 일반 `serve`는 이를 자동 생성하지 않는다. 대기열 Redis marker/control과 MySQL 접속을 확인한 뒤 HTTP를 시작하고, 별도 백그라운드 작업이 인스턴스의 Ed25519 공개키를 키 Redis에 등록·교체한다. 등록 실패에도 프로세스는 유지되며 제한 시간·백오프를 둔 재시도를 계속한다. `/livez`는 프로세스 응답, `/readyz`는 대기열 Redis ping·installation 상태·현재 활성 공개키 조회·MySQL ping을 **읽기 전용**으로 확인한다. 등록 전에는 `/readyz`가 503이고, 서명이 필요한 발급·갱신도 503이다. `/readyz`가 과거 공개키 전체의 보존, 좌석 캐시의 최신성이나 scheduler lease 보유까지 보증하지는 않는다. 종료 시 HTTP server를 제한 시간 안에 shutdown하고 백그라운드 작업을 취소한다.
+`migrate`는 MySQL schema/seed를 적용하고, `init-state`는 대기열 Redis installation marker와 이벤트 control을 명시적으로 초기화한다. 일반 `serve`는 이를 자동 생성하지 않는다. 대기열 Redis marker/control과 MySQL 접속을 확인한 뒤 HTTP를 시작하고, 별도 백그라운드 작업이 인스턴스의 Ed25519 공개키를 키 Redis에 등록·교체한다. 등록 실패에도 프로세스는 유지되며 제한 시간·백오프를 둔 재시도를 계속한다. `/livez`는 프로세스 응답, `/readyz`는 대기열 Redis ping·installation 상태·현재 활성 공개키 조회·MySQL ping을 **읽기 전용**으로 확인한다. 등록 전에는 `/readyz`가 503이고, 서명이 필요한 발급·갱신도 503이다. `/readyz`가 과거 공개키 전체의 보존, 좌석 캐시의 최신성이나 scheduler lease 보유까지 보증하지는 않는다. 종료 시 HTTP server를 제한 시간 안에 shutdown하고 백그라운드 작업을 취소한 다음, 진행 중인 서명이 끝나면 개인키 보호 버퍼를 파기한다.
 
 | 장애 | 현재 동작과 한계 |
 |---|---|

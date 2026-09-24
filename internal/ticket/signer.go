@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/awnumar/memguard"
+
 	"github.com/snowmerak/ticketing/internal/apierr"
 	"github.com/snowmerak/ticketing/internal/id"
 )
@@ -43,7 +45,7 @@ type Claims struct {
 type signingKey struct {
 	id        string
 	public    ed25519.PublicKey
-	private   ed25519.PrivateKey
+	private   *memguard.LockedBuffer
 	signUntil time.Time
 }
 
@@ -69,12 +71,26 @@ func KeyID(publicKey ed25519.PublicKey) string {
 }
 
 func (s *Signer) generateKey() (*signingKey, error) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	seed, err := memguard.NewBufferFromReader(rand.Reader, ed25519.SeedSize)
 	if err != nil {
+		seed.Destroy()
 		return nil, err
 	}
+	if seed.Size() != ed25519.SeedSize {
+		seed.Destroy()
+		return nil, errors.New("secure memory is unavailable for ticket signing")
+	}
+	privateKey := ed25519.NewKeyFromSeed(seed.Bytes())
+	seed.Destroy()
+	publicKey := append(ed25519.PublicKey(nil), privateKey[ed25519.SeedSize:]...)
+	lockedPrivate := memguard.NewBufferFromBytes(privateKey)
+	if lockedPrivate.Size() != ed25519.PrivateKeySize {
+		memguard.WipeBytes(privateKey) // Allocation failure does not move or wipe the source.
+		lockedPrivate.Destroy()
+		return nil, errors.New("secure memory is unavailable for ticket signing")
+	}
 	key := &signingKey{
-		id: KeyID(publicKey), public: publicKey, private: privateKey,
+		id: KeyID(publicKey), public: publicKey, private: lockedPrivate,
 		signUntil: time.Now().Add(s.lifetime),
 	}
 	return key, nil
@@ -88,12 +104,31 @@ func (s *Signer) Run(ctx context.Context, attemptTimeout time.Duration, report f
 		panic("ticket signer requires a positive publication timeout")
 	}
 	var pending *signingKey
+	defer func() {
+		if pending != nil && pending != s.currentKey() {
+			pending.private.Destroy()
+		}
+	}()
 	retry := initialKeyRetry
 	failed := false
 	for ctx.Err() == nil {
 		current := s.currentKey()
 		now := time.Now()
+		if current != nil && !now.Before(current.signUntil) {
+			// Requests holding the read lock finish before the expired key is wiped.
+			s.mu.Lock()
+			if s.current == current {
+				s.current = nil
+			}
+			s.mu.Unlock()
+			current.private.Destroy()
+			if pending == current {
+				pending = nil
+			}
+			current = nil
+		}
 		if pending != nil && !now.Before(pending.signUntil) {
+			pending.private.Destroy()
 			pending = nil
 		}
 		if pending == nil {
@@ -134,6 +169,9 @@ func (s *Signer) Run(ctx context.Context, attemptTimeout time.Duration, report f
 				s.mu.Lock()
 				s.current = pending
 				s.mu.Unlock()
+				if current != nil {
+					current.private.Destroy()
+				}
 			}
 			pending = nil
 			retry = initialKeyRetry
@@ -144,6 +182,9 @@ func (s *Signer) Run(ctx context.Context, attemptTimeout time.Duration, report f
 			continue
 		}
 		if err == nil {
+			if pending != current {
+				pending.private.Destroy()
+			}
 			pending = nil // Publication finished after this key's signing window.
 			if !waitFor(ctx, jitter(initialKeyRetry)) {
 				return
@@ -158,6 +199,18 @@ func (s *Signer) Run(ctx context.Context, attemptTimeout time.Duration, report f
 			return
 		}
 		retry = min(retry*2, maxKeyRetry)
+	}
+}
+
+// Close wipes the active private key after Run has stopped and HTTP requests
+// have drained. It is safe to call more than once.
+func (s *Signer) Close() {
+	s.mu.Lock()
+	key := s.current
+	s.current = nil
+	s.mu.Unlock()
+	if key != nil {
+		key.private.Destroy()
 	}
 }
 
@@ -253,9 +306,13 @@ func (s *Signer) Renew(ctx context.Context, claims Claims, now time.Time, ttl ti
 }
 
 func (s *Signer) sign(ctx context.Context, claims Claims) (string, Claims, error) {
-	key, err := s.active()
-	if err != nil {
-		return "", Claims{}, err
+	// Rotation and Close need the write lock before wiping this key. Hold the
+	// read lock through registry lookup and signing so Bytes never outlives it.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	key := s.current
+	if key == nil || !time.Now().Before(key.signUntil) {
+		return "", Claims{}, registryUnavailable(errors.New("no registered signing key is active"))
 	}
 	if err := s.checkPublished(ctx, key); err != nil {
 		return "", Claims{}, err
@@ -269,8 +326,17 @@ func (s *Signer) sign(ctx context.Context, claims Claims) (string, Claims, error
 	if err != nil {
 		return "", Claims{}, err
 	}
-	signature := ed25519.Sign(key.private, payload)
+	signature := signPayload(key.private, payload)
 	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(signature), claims, nil
+}
+
+func signPayload(private *memguard.LockedBuffer, payload []byte) []byte {
+	// Go's ed25519 implementation associates a runtime weak pointer with the
+	// key and therefore cannot sign directly from memguard's non-Go memory.
+	// Keep this heap copy only for the call, then wipe it even if Sign panics.
+	privateCopy := append(ed25519.PrivateKey(nil), private.Bytes()...)
+	defer memguard.WipeBytes(privateCopy)
+	return ed25519.Sign(privateCopy, payload)
 }
 
 func (s *Signer) Verify(ctx context.Context, token, subjectID string, eventID, maxSeq uint64, now time.Time) (Claims, error) {

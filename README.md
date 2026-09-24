@@ -4,6 +4,8 @@
 
 This Go service implements a Redis-backed waiting queue and admission control, with MySQL-backed single-seat holds and simulated purchases. Each service instance signs queue tickets with an ephemeral Ed25519 key; a separate Redis stores public verification keys for cross-instance use.
 
+Long-lived private keys are kept in `memguard` locked memory and destroyed on rotation or shutdown. Signing briefly uses a wiped Go-memory copy; this is not an enclave or a defense against code with process-level access. See the [configuration reference](./docs/configuration.md) for the memory-lock requirement.
+
 Two product rules are central:
 
 - A user may purchase at most one seat per event. A MySQL purchase guard and UNIQUE constraints enforce this even under concurrent requests.

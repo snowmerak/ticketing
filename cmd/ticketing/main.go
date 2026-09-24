@@ -95,6 +95,7 @@ func run(logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("initialize ticket signing: %w", err)
 		}
+		defer signer.Close()
 		queueStore = queue.NewStore(redisClient, signer, cfg)
 		return serve(ctx, cfg, redisClient, queueStore, signer, logger)
 	default:
@@ -127,14 +128,18 @@ func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, qu
 	}
 	worker := queue.NewWorker(queueStore, cfg, workerID, db.PingContext, logger)
 	backgroundCtx, stopBackground := context.WithCancel(ctx)
-	defer stopBackground()
-	go signer.Run(backgroundCtx, cfg.DependencyTimeout, func(err error) {
-		if err != nil {
-			logger.Warn("ticket_key_registration_retrying", "error", err)
-		} else {
-			logger.Info("ticket_key_registration_recovered")
-		}
-	})
+	signerDone := make(chan struct{})
+	defer func() { stopBackground(); <-signerDone }()
+	go func() {
+		defer close(signerDone)
+		signer.Run(backgroundCtx, cfg.DependencyTimeout, func(err error) {
+			if err != nil {
+				logger.Warn("ticket_key_registration_retrying", "error", err)
+			} else {
+				logger.Info("ticket_key_registration_recovered")
+			}
+		})
+	}()
 	go worker.Run(backgroundCtx)
 	go seatCache.Run(backgroundCtx)
 	go runHoldReaper(backgroundCtx, bookingStore, cfg.HoldReaperInterval, logger)

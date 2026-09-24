@@ -1,5 +1,11 @@
 # Test Report — 2026-09-24
 
+## memguard 개인키 보관 변경 검증
+
+Windows 호스트에서 `go test -count=1 ./...`, `go vet ./...`, `go test -count=1 -tags=integration ./...`, `go test -count=1 -tags=e2e ./e2e`가 통과했다. 실제 두 Redis·MySQL이 켜진 상태였다. `golang:1.27.1-bookworm` 컨테이너에서 `go test -race -count=1 -tags=integration ./...`와 마지막 동시 종료 회귀 테스트를 포함한 `go test -race -count=1 ./internal/ticket`도 통과했다. 서명기 단위 테스트는 교체된 개인키와 `Close` 후 활성 개인키의 `memguard` 버퍼 파기, 진행 중 서명이 끝난 뒤 파기하는 순서를 확인한다.
+
+초기 구현에서 `memguard` 버퍼를 Go 1.27 표준 `crypto/ed25519.Sign`에 직접 전달했을 때 런타임의 `getWeakHandle on invalid pointer` 오류를 확인해, 최종 구현은 서명 호출 동안 짧은 일반 메모리 복사본을 사용하고 즉시 지운다. 장기 보관 키의 잠긴 메모리 사용과 파기는 검증했지만, 표준 암호 라이브러리 내부 임시 사본의 완전 제거·프로세스 권한 공격 방어·운영 OS의 메모리 잠금 한도는 보증하지 않는다.
+
 ## 백그라운드 키 등록·회전 변경 검증
 
 Windows 개발 노트북의 로컬 Compose 대기열 Redis·키 Redis·MySQL을 사용해 변경 working tree에서 실행했다.

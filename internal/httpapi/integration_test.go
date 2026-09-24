@@ -218,7 +218,7 @@ func TestTicketKeyRedisUnavailableMakesReadinessFailClosedIntegration(t *testing
 	runCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); signer.Run(runCtx, cfg.DependencyTimeout, nil) }()
-	t.Cleanup(func() { stop(); <-done })
+	t.Cleanup(func() { stop(); <-done; signer.Close() })
 	waitSignerReady(t, signer, cfg.DependencyTimeout)
 	queueStore := queue.NewStore(queueClient, signer, cfg)
 	if err := queueStore.Initialize(ctx); err != nil {
@@ -257,7 +257,7 @@ func integrationSigner(t *testing.T, cfg config.Config) *ticket.Signer {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); signer.Run(ctx, cfg.DependencyTimeout, nil) }()
-	t.Cleanup(func() { cancel(); <-done })
+	t.Cleanup(func() { cancel(); <-done; signer.Close() })
 	waitSignerReady(t, signer, cfg.DependencyTimeout)
 	return signer
 }
