@@ -2,7 +2,7 @@
 
 [Korean translation](./README_KO.md)
 
-This Go service implements a Redis-backed waiting queue and admission control, with MySQL-backed single-seat holds and simulated purchases.
+This Go service implements a Redis-backed waiting queue and admission control, with MySQL-backed single-seat holds and simulated purchases. Each service instance signs queue tickets with an ephemeral Ed25519 key; a separate Redis stores public verification keys for cross-instance use.
 
 Two product rules are central:
 
@@ -30,7 +30,7 @@ Invoke-RestMethod http://127.0.0.1:8080/readyz
 
 `migrate` and `init-state` are explicit setup steps. A normal `serve` does not create or recover Redis authority state automatically; it refuses to start if the installation marker is missing.
 
-Defaults are in [config.go](./internal/config/config.go), and development examples are in [.env.example](./.env.example). See the [configuration reference (Korean)](./docs/configuration.md) for all settings and their lifecycle. The application does not load `.env` automatically, so pass any required values through the process environment. The default `TICKET_HMAC_KEY` is only a local development fixture.
+Defaults are in [config.go](./internal/config/config.go), and development examples are in [.env.example](./.env.example). See the [configuration reference (Korean)](./docs/configuration.md) for all settings and their lifecycle. The application does not load `.env` automatically, so pass any required values through the process environment. `serve` needs both the queue Redis and the separate ticket-key Redis; `migrate` and `init-state` do not register signing keys.
 
 To reduce request logging:
 
@@ -48,7 +48,7 @@ go test ./...
 go vet ./...
 ```
 
-Start the real Redis/MySQL dependencies before running integration tests. If they are unavailable, these tests fail rather than silently skip:
+Start both Redis instances and MySQL before running integration tests. If they are unavailable, these tests fail rather than silently skip:
 
 ```powershell
 docker compose up -d --wait
@@ -56,19 +56,20 @@ go run ./cmd/ticketing migrate
 go test -count=1 -tags=integration ./...
 ```
 
-The full API end-to-end test runs a built binary, HTTP listener, and admission worker. It creates a dedicated random event and cleans up only that event's MySQL/Redis data. It does not touch the existing seat and order data for events 100/200:
+The full API end-to-end test runs a built binary, HTTP listener, and admission worker. It creates a dedicated random event and cleans up that event's MySQL/queue-Redis data; generated public keys remain in the separate Redis until their TTL expires. It does not touch the existing seat and order data for events 100/200:
 
 ```powershell
 go test -tags=e2e -count=1 -v ./e2e
 ```
 
-The journey covers DIRECT admission occupying capacity; multiple QUEUE tickets for one subject; a server restart; heartbeat, grant, and redeem; seat-map lookup, hold, cancellation, automatic assignment, and confirmation; then new tickets and a new booking permit after purchase, with another purchase still rejected. It does not execute browser JavaScript or charge a real payment method.
+The journey covers DIRECT admission occupying capacity; multiple QUEUE tickets for one subject; a server restart that verifies an earlier instance's ticket via the public-key Redis; heartbeat, grant, and redeem; seat-map lookup, hold, cancellation, automatic assignment, and confirmation; then new tickets and a new booking permit after purchase, with another purchase still rejected. It does not execute browser JavaScript or charge a real payment method.
 
 If the Windows host has no C compiler, you can run the race detector in a Linux container:
 
 ```powershell
 docker run --rm -v "${PWD}:/src" -w /src `
   -e REDIS_ADDR=host.docker.internal:16379 `
+  -e TICKET_KEY_REDIS_ADDR=host.docker.internal:16380 `
   -e "MYSQL_DSN=ticketing:ticketing@tcp(host.docker.internal:13306)/ticketing?parseTime=true&loc=UTC&charset=utf8mb4&multiStatements=true" `
   golang:1.27.1-bookworm go test -race -count=1 -tags=integration ./...
 ```
@@ -101,10 +102,10 @@ The runner uses a separate synthetic event and Docker API/k6 containers, then cl
 
 ## State and recovery
 
-- Redis uses `noeviction` and AOF. If loss of epoch/meta/spent/permit state is suspected, the system fails closed with `QUEUE_RECOVERING` instead of silently switching to DIRECT admission.
+- Both Redis instances use `noeviction` and AOF. If loss of queue epoch/meta/spent/permit state is suspected, the system fails closed with `QUEUE_RECOVERING` instead of silently switching to DIRECT admission. Ticket-key Redis outages stop ticket issuance/verification and readiness; loss of old public keys can invalidate outstanding tickets.
 - When MySQL is unavailable, the queue API issues tickets instead of direct booking permits. Seat mutations fail.
 - `init-state` is for initial installation, not a way to overwrite partial state loss with an apparently healthy empty state.
-- Use `docker compose down -v` only when you intend to discard all local data and start over. It permanently deletes the local Redis/MySQL volumes; run `up`, `migrate`, and `init-state` afterward.
+- Use `docker compose down -v` only when you intend to discard all local data and start over. It permanently deletes both local Redis volumes and the MySQL volume; run `up`, `migrate`, and `init-state` afterward.
 
 ## Contracts and authority
 

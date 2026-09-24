@@ -5,9 +5,9 @@
 ## 적용 방식
 
 - `migrate`, `init-state`, `serve` 모두 시작 시 프로세스 환경 변수에서 설정을 읽고 검증한다. `serve` 실행 중 환경 변수 재적용 기능은 없다.
-- 환경 변수가 없거나 빈 문자열이면 코드 기본값을 사용한다. 단, `REDIS_PASSWORD`는 빈 문자열이 그대로 적용된다. `.env.example`은 예시일 뿐이며 앱이 `.env` 파일을 자동으로 읽지 않는다.
+- 환경 변수가 없거나 빈 문자열이면 코드 기본값을 사용한다. 단, `REDIS_PASSWORD`와 `TICKET_KEY_REDIS_PASSWORD`는 빈 문자열이 그대로 적용된다. `.env.example`은 예시일 뿐이며 앱이 `.env` 파일을 자동으로 읽지 않는다.
 - 시간 값은 Go duration 형식이다(예: `250ms`, `3s`, `20m`). `EVENT_IDS`는 0보다 큰 10진수 ID의 쉼표 구분 목록이며 공백을 제거하고 중복을 없앤다.
-- 각 명령이 실제로 사용하지 않는 연결 정보도 설정 로드 대상이다. 예를 들어 `migrate` 역시 현재는 유효한 티켓 서명키 설정을 요구한다.
+- 세 명령은 같은 설정 구조를 파싱하지만, `migrate`는 MySQL만 연결하고 `init-state`는 대기열 Redis만 연결한다. `serve`에서만 티켓 키 Redis에 공개키를 등록한다.
 
 ## 연결, 식별, 인증, 서명
 
@@ -16,15 +16,16 @@
 | `HTTP_ADDR` | `:8080` | `serve`의 HTTP 수신 주소 |
 | `REDIS_ADDR` | `127.0.0.1:16379` | 대기열·제어 상태 Redis 주소 |
 | `REDIS_PASSWORD` | 빈 문자열 | Redis 인증 비밀번호 |
+| `TICKET_KEY_REDIS_ADDR` | `127.0.0.1:16380` | 공개 검증키만 저장하는 별도 Redis 주소 |
+| `TICKET_KEY_REDIS_PASSWORD` | 빈 문자열 | 티켓 키 Redis 인증 비밀번호 |
 | `MYSQL_DSN` | `ticketing:ticketing@tcp(127.0.0.1:13306)/ticketing?parseTime=true&loc=UTC&charset=utf8mb4&multiStatements=true` | MySQL 연결 문자열 |
 | `TICKETING_INSTALLATION_ID` | `ticketing-local-v1` | Redis installation marker와 이벤트 제어 상태의 설치 식별자 |
 | `EVENT_IDS` | `100,200` | 이 프로세스가 초기화하거나 서비스할 이벤트 ID 목록 |
 | `AUTH_MODE` | `development` | 현재 구현된 유일한 인증 모드. 개발용 subject 헤더 사용 |
-| `TICKET_HMAC_KEY_ID` | `local-v1` | 대기표의 `kid`에 기록하는 현재 대칭키 식별자 |
-| `TICKET_HMAC_KEY` | 개발용 Base64 fixture ([코드](../internal/config/config.go)) | Base64로 인코딩한 HMAC-SHA-256 비밀키. 디코딩 결과 최소 32바이트 필요 |
+| `TICKET_KEY_LIFETIME` | `1h` | 한 인스턴스가 생성한 Ed25519 개인키의 서명 가능 기간. 만료 후 다음 발급·갱신 시 새 키쌍을 생성 |
 | `TICKETING_LOG_LEVEL` | `info` | JSON 로그 수준. `debug`, `warn`, `error`도 인식하며 그 밖의 값은 `info`로 처리 |
 
-기본 MySQL 자격증명과 HMAC 키는 로컬 fixture다. 운영 비밀은 별도로 주입하고 소스·로그에 남기지 않는다. `AUTH_MODE=development`와 개발용 subject 헤더를 공개 서비스에 사용하지 않는다.
+기본 MySQL 자격증명은 로컬 fixture다. 운영 비밀번호는 별도로 주입하고 소스·로그에 남기지 않는다. 개인 서명키는 인스턴스 메모리에만 생성·보유하며 Redis에는 공개키만 저장한다. `AUTH_MODE=development`와 개발용 subject 헤더를 공개 서비스에 사용하지 않는다.
 
 ## 대기열과 입장 제어
 
@@ -61,12 +62,14 @@
 
 ## 시작 시 검증과 다중 인스턴스
 
-현재 시작 시 검증하는 조건은 `AUTH_MODE=development`, HMAC 키 최소 길이, 비어 있지 않은 installation/key ID, `SLOT_WIDTH > 0`, `READY_WINDOW >= SLOT_WIDTH`, `PAGE_BITS > 0` 및 8의 배수, `GRANT_TTL > POLL_INTERVAL`, `BOOKING_IDLE_TTL > 0`, `BOOKING_MAX_LIFETIME >= BOOKING_IDLE_TTL`, 양수인 capacity·admission rate·burst·grant 상한, 비어 있지 않은 `EVENT_IDS`다. 모든 시간·정수 설정의 양수 여부를 일괄 검증하는 것은 아니므로 잘못된 값이 시작 뒤에 실패를 일으킬 수 있다.
+현재 시작 시 검증하는 조건은 `AUTH_MODE=development`, 비어 있지 않은 installation ID와 키 Redis 주소, `TICKET_TTL > 0`, `0 < TICKET_KEY_LIFETIME <= 24h`, `SLOT_WIDTH > 0`, `READY_WINDOW >= SLOT_WIDTH`, `PAGE_BITS > 0` 및 8의 배수, `GRANT_TTL > POLL_INTERVAL`, `BOOKING_IDLE_TTL > 0`, `BOOKING_MAX_LIFETIME >= BOOKING_IDLE_TTL`, 양수인 capacity·admission rate·burst·grant 상한, 비어 있지 않은 `EVENT_IDS`다. 모든 시간·정수 설정의 양수 여부를 일괄 검증하는 것은 아니므로 잘못된 값이 시작 뒤에 실패를 일으킬 수 있다.
 
-여러 `serve` 인스턴스가 같은 이벤트를 다룬다면 같은 installation ID와 호환되는 대기표·대기열 설정을 사용해야 한다. 특히 현재 서명 검증기는 프로세스에 주입된 단일 HMAC 키만 알고 있으므로 모든 인스턴스가 동일한 `TICKET_HMAC_KEY_ID`와 `TICKET_HMAC_KEY`를 가져야 서로의 대기표를 검증할 수 있다. `PAGE_BITS`, `SLOT_WIDTH`, `READY_WINDOW`처럼 Redis 비트맵 해석에 영향을 주는 값도 인스턴스 간 일치시킨다.
+여러 `serve` 인스턴스가 같은 이벤트를 다룬다면 같은 installation ID, 티켓 키 Redis, 호환되는 대기표·대기열 설정을 사용해야 한다. 개인키는 공유하지 않아도 되지만, 다른 인스턴스가 발급한 토큰을 검증하려면 같은 공개키 레지스트리에 접근해야 한다. `TICKET_TTL`, `PAGE_BITS`, `SLOT_WIDTH`, `READY_WINDOW`처럼 토큰 수명이나 Redis 비트맵 해석에 영향을 주는 값도 인스턴스 간 일치시킨다.
 
-## 서명키와 로테이션의 현재 상태
+## 서명키와 로테이션
 
-현재 대기표는 HMAC-SHA-256으로 서명하며 `kid`를 포함한다. 그러나 `kid`는 공개키 해시가 아니라 `TICKET_HMAC_KEY_ID` 환경 변수의 문자열이다. 프로세스 시작 시 단일 대칭 비밀키만 서명기·검증기에 넣는다. 과거 키를 설정으로 추가하거나 Redis에서 키를 조회하는 기능, 자동 키 생성·등록·회전 기능은 없다. 단순히 키나 ID를 바꾸면 기존 미만료 대기표가 검증되지 않을 수 있다.
+대기표 버전 2는 Ed25519로 서명한다. `serve`는 인스턴스별 키쌍을 메모리에서 생성하고 공개키를 별도 Redis에 **먼저** 등록한 뒤 서명한다. `kid`는 공개키 바이트의 SHA-256 해시를 Base64 URL-safe(no padding)로 인코딩한 값이다. 검증은 토큰의 `kid`로 공개키를 조회하고 해시·서명·subject·event·epoch·만료·순번 상한을 확인한다. Redis 접근과 저장 형식은 [키 Redis 어댑터](../internal/keyredis/registry.go)에 캡슐화되어 있다.
 
-제안된 **인스턴스별 메모리 내 비대칭 키쌍 생성 → 공개키 해시를 `kid`로 사용 → 별도 Redis에 공개키 등록 → 토큰의 `kid`로 조회·검증** 방식은 현재 설정·구현에 포함되어 있지 않다. 이는 HMAC의 단순 로테이션이 아니라 서명 프로토콜과 검증 신뢰 경계의 변경이다. 채택한다면 공개키 등록 주체의 신뢰, 서명 전 등록 보장, 만료된 토큰이 모두 사라질 때까지 이전 공개키 유지, 키 Redis 장애 시 처리 정책을 별도로 정해야 한다.
+서명 가능 기간은 키 생성 시각부터 `TICKET_KEY_LIFETIME`이다. 기간이 지나면 다음 발급·갱신 시 새 키쌍을 등록하고 전환한다. 기존 공개키의 Redis TTL은 등록 시점부터 `TICKET_KEY_LIFETIME + TICKET_TTL + 1m`이며, 이전 개인키가 사라져도 이전 공개키로 미만료 대기표를 검증할 수 있다. 발급 전에는 현재 공개키가 등록되어 있는지 재확인한다. 키 Redis가 불가하거나 현재 키가 사라지면 발급·검증·readiness가 `TICKET_KEY_UNAVAILABLE`로 닫힌다. 모르는 `kid`는 `TICKET_INVALID`다.
+
+키 Redis에는 AOF와 `noeviction`을 사용하지만 Redis 장애·상태 손실의 무손실 복구는 보장하지 않는다. 공개키 등록 권한은 별도 Redis의 네트워크·인증/ACL로 제한해야 하며, 공개키 해시만으로 등록 주체를 인증하지는 못한다. 키 Redis 접근 가능자가 임의 키를 등록할 수 있으면 토큰을 위조할 수 있다. 현재는 자동 재등록/복구, 긴급 폐기, 다중 버전 무중단 롤백을 제공하지 않는다. 기존 HMAC 버전 1 대기표는 새 버전 2에서 거부되므로, 배포 전 미만료 대기표의 처리 방침을 정해야 한다.

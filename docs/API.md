@@ -16,7 +16,7 @@
 | Method/path | 결과 |
 |---|---|
 | `GET /livez` | 프로세스 생존 여부 |
-| `GET /readyz` | Redis, installation marker, MySQL 준비 여부 |
+| `GET /readyz` | 대기열 Redis와 installation marker, 티켓 키 Redis의 현재 공개키, MySQL 준비 여부 |
 | `GET /metrics` | route/status class별 현재 프로세스 요청 누계 |
 | `GET /` | 개발용 브라우저 클라이언트 |
 
@@ -35,6 +35,8 @@
 ```
 
 기존 ticket을 갱신하려면 `{"ticket":"..."}`을 보냅니다. 새 ticket 없이 호출할 때마다 같은 사용자에게도 새 대기표를 만들 수 있습니다.
+
+대기표 버전 2는 서버가 생성한 Ed25519 키로 서명하며 `kid`로 별도 Redis의 공개키를 찾습니다. 키 Redis가 불가하거나 현재 서명키를 조회할 수 없으면 `TICKET_KEY_UNAVAILABLE`(503, 재시도 가능)을 반환합니다. 알 수 없는 `kid`와 이전 HMAC 버전 1 대기표는 `TICKET_INVALID`입니다.
 
 ### `POST /queue/heartbeat`
 

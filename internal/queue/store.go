@@ -15,6 +15,7 @@ import (
 	"github.com/snowmerak/ticketing/internal/apierr"
 	"github.com/snowmerak/ticketing/internal/config"
 	"github.com/snowmerak/ticketing/internal/id"
+	"github.com/snowmerak/ticketing/internal/ticket"
 	rediscripts "github.com/snowmerak/ticketing/redis/lua"
 )
 
@@ -22,7 +23,7 @@ const installationMarkerKey = "ticketing:installation"
 
 type Store struct {
 	client *redis.Client
-	signer *TicketSigner
+	signer *ticket.Signer
 	cfg    config.Config
 
 	entryScript            *redis.Script
@@ -38,11 +39,11 @@ type Store struct {
 }
 
 type EntryResult struct {
-	Kind       string        `json:"kind"`
-	Ticket     string        `json:"ticket,omitempty"`
-	Claims     *TicketClaims `json:"-"`
-	Booking    *Booking      `json:"booking,omitempty"`
-	ServerTime time.Time     `json:"server_time"`
+	Kind       string         `json:"kind"`
+	Ticket     string         `json:"ticket,omitempty"`
+	Claims     *ticket.Claims `json:"-"`
+	Booking    *Booking       `json:"booking,omitempty"`
+	ServerTime time.Time      `json:"server_time"`
 }
 
 type HeartbeatResult struct {
@@ -83,7 +84,7 @@ type StatsSnapshot struct {
 	AsOfMS   int64   `json:"as_of_ms"`
 }
 
-func NewStore(client *redis.Client, signer *TicketSigner, cfg config.Config) *Store {
+func NewStore(client *redis.Client, signer *ticket.Signer, cfg config.Config) *Store {
 	return &Store{
 		client: client, signer: signer, cfg: cfg,
 		entryScript: redis.NewScript(rediscripts.Entry), heartbeatScript: redis.NewScript(rediscripts.Heartbeat),
@@ -94,7 +95,14 @@ func NewStore(client *redis.Client, signer *TicketSigner, cfg config.Config) *St
 	}
 }
 
-func (s *Store) Client() *redis.Client { return s.client }
+func (s *Store) Ping(ctx context.Context) error { return s.client.Ping(ctx).Err() }
+
+func (s *Store) CheckSigning(ctx context.Context) error {
+	if s.signer == nil {
+		return errors.New("ticket signer is not configured")
+	}
+	return s.signer.Ready(ctx)
+}
 
 func (s *Store) Initialize(ctx context.Context) error {
 	existing, err := s.client.Get(ctx, installationMarkerKey).Result()
@@ -216,7 +224,7 @@ func (s *Store) Entry(ctx context.Context, eventID uint64, subjectID string, all
 		case "TICKET":
 			seq, _ := strconv.ParseUint(values[2], 10, 64)
 			nowMS, _ := strconv.ParseInt(values[3], 10, 64)
-			token, claims, err := s.signer.New(eventID, values[1], seq, subjectID, time.UnixMilli(nowMS), s.cfg.TicketTTL)
+			token, claims, err := s.signer.New(ctx, eventID, values[1], seq, subjectID, time.UnixMilli(nowMS), s.cfg.TicketTTL)
 			if err != nil {
 				return EntryResult{}, err
 			}
@@ -234,7 +242,7 @@ func (s *Store) Heartbeat(ctx context.Context, eventID uint64, subjectID, token 
 		if err != nil {
 			return HeartbeatResult{}, err
 		}
-		claims, err := s.signer.Verify(token, subjectID, eventID, s.cfg.MaxSeqPerEpoch, now)
+		claims, err := s.signer.Verify(ctx, token, subjectID, eventID, s.cfg.MaxSeqPerEpoch, now)
 		if err != nil {
 			return HeartbeatResult{}, err
 		}
@@ -276,7 +284,7 @@ func (s *Store) Heartbeat(ctx context.Context, eventID uint64, subjectID, token 
 			nowMSIndex = 3
 		}
 		nowMS, _ := strconv.ParseInt(values[nowMSIndex], 10, 64)
-		newToken, renewed, err := s.signer.Renew(claims, time.UnixMilli(nowMS), s.cfg.TicketTTL)
+		newToken, renewed, err := s.signer.Renew(ctx, claims, time.UnixMilli(nowMS), s.cfg.TicketTTL)
 		if err != nil {
 			return HeartbeatResult{}, err
 		}
@@ -299,7 +307,7 @@ func (s *Store) Redeem(ctx context.Context, eventID uint64, subjectID, token, gr
 	if err != nil {
 		return Booking{}, err
 	}
-	claims, err := s.signer.Verify(token, subjectID, eventID, s.cfg.MaxSeqPerEpoch, now)
+	claims, err := s.signer.Verify(ctx, token, subjectID, eventID, s.cfg.MaxSeqPerEpoch, now)
 	if err != nil {
 		return Booking{}, err
 	}
@@ -559,7 +567,7 @@ func (s *Store) RefreshStats(ctx context.Context, eventID uint64, epoch string) 
 	return s.client.HSet(ctx, s.statsKey(eventID, epoch), "snapshot", raw).Err()
 }
 
-func (s *Store) applyEstimate(ctx context.Context, eventID uint64, claims TicketClaims, response *HeartbeatResult) {
+func (s *Store) applyEstimate(ctx context.Context, eventID uint64, claims ticket.Claims, response *HeartbeatResult) {
 	raw, err := s.client.HGet(ctx, s.statsKey(eventID, claims.Epoch), "snapshot").Bytes()
 	if err != nil {
 		response.EstimateStale = true

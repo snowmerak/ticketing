@@ -16,8 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/snowmerak/ticketing/internal/apierr"
 	"github.com/snowmerak/ticketing/internal/booking"
 	"github.com/snowmerak/ticketing/internal/config"
@@ -36,7 +34,6 @@ type Server struct {
 	booking   *booking.Store
 	seatCache *booking.SeatCache
 	db        *sql.DB
-	redis     *redis.Client
 	logger    *slog.Logger
 	mux       *http.ServeMux
 
@@ -44,10 +41,10 @@ type Server struct {
 	requests  map[string]uint64
 }
 
-func New(cfg config.Config, queueStore *queue.Store, bookingStore *booking.Store, seatCache *booking.SeatCache, db *sql.DB, redisClient *redis.Client, logger *slog.Logger) *Server {
+func New(cfg config.Config, queueStore *queue.Store, bookingStore *booking.Store, seatCache *booking.SeatCache, db *sql.DB, logger *slog.Logger) *Server {
 	server := &Server{
 		cfg: cfg, queue: queueStore, booking: bookingStore, seatCache: seatCache,
-		db: db, redis: redisClient, logger: logger, mux: http.NewServeMux(), requests: make(map[string]uint64),
+		db: db, logger: logger, mux: http.NewServeMux(), requests: make(map[string]uint64),
 	}
 	server.routes()
 	return server
@@ -105,12 +102,16 @@ func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.DependencyTimeout)
 	defer cancel()
-	if err := s.redis.Ping(ctx).Err(); err != nil {
+	if err := s.queue.Ping(ctx); err != nil {
 		writeError(w, apierr.Wrap(http.StatusServiceUnavailable, "REDIS_UNAVAILABLE", "redis is unavailable", true, err))
 		return
 	}
 	if err := s.queue.CheckInstallation(ctx); err != nil {
 		writeError(w, apierr.Wrap(http.StatusServiceUnavailable, "QUEUE_RECOVERING", "queue installation state is invalid", true, err))
+		return
+	}
+	if err := s.queue.CheckSigning(ctx); err != nil {
+		writeError(w, err)
 		return
 	}
 	if err := s.db.PingContext(ctx); err != nil {

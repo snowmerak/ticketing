@@ -19,7 +19,9 @@ import (
 	"github.com/snowmerak/ticketing/internal/database"
 	"github.com/snowmerak/ticketing/internal/httpapi"
 	"github.com/snowmerak/ticketing/internal/id"
+	"github.com/snowmerak/ticketing/internal/keyredis"
 	"github.com/snowmerak/ticketing/internal/queue"
+	"github.com/snowmerak/ticketing/internal/ticket"
 )
 
 func main() {
@@ -53,11 +55,7 @@ func run(logger *slog.Logger) error {
 
 	redisClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword, Protocol: 2})
 	defer redisClient.Close()
-	signer, err := queue.NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		return err
-	}
-	queueStore := queue.NewStore(redisClient, signer, cfg)
+	queueStore := queue.NewStore(redisClient, nil, cfg)
 
 	switch command {
 	case "init-state":
@@ -91,6 +89,15 @@ func run(logger *slog.Logger) error {
 		logger.Info("mysql_migrations_applied", "directory", directory)
 		return nil
 	case "serve":
+		keyClient := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword, Protocol: 2})
+		defer keyClient.Close()
+		keyCtx, cancel := context.WithTimeout(ctx, cfg.DependencyTimeout)
+		signer, err := ticket.NewSigner(keyCtx, keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("initialize ticket signing: %w", err)
+		}
+		queueStore = queue.NewStore(redisClient, signer, cfg)
 		return serve(ctx, cfg, redisClient, queueStore, logger)
 	default:
 		return fmt.Errorf("unknown command %q; use serve, init-state, or migrate", command)
@@ -105,6 +112,9 @@ func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, qu
 	}
 	if err := queueStore.CheckInstallation(startupCtx); err != nil {
 		return fmt.Errorf("check redis state (run init-state explicitly): %w", err)
+	}
+	if err := queueStore.CheckSigning(startupCtx); err != nil {
+		return fmt.Errorf("check ticket verification key: %w", err)
 	}
 	db, err := database.Open(cfg.MySQLDSN)
 	if err != nil {
@@ -127,7 +137,7 @@ func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, qu
 	go seatCache.Run(backgroundCtx)
 	go runHoldReaper(backgroundCtx, bookingStore, cfg.HoldReaperInterval, logger)
 
-	api := httpapi.New(cfg, queueStore, bookingStore, seatCache, db, redisClient, logger)
+	api := httpapi.New(cfg, queueStore, bookingStore, seatCache, db, logger)
 	httpServer := &http.Server{
 		Addr: cfg.HTTPAddr, Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,

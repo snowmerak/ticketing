@@ -101,13 +101,15 @@ V1은 하나의 Go 코드베이스 안에서 기능을 모듈로 분리하는 �
 | Hold reaper | 만료 hold의 소유권 재확인과 반환 | MySQL 현재 행 | 지연 시 좌석을 보수적으로 HELD로 남긴다. |
 | Seat snapshot refresher | committed inventory의 조회용 projection | 권위 없음 | 마지막 snapshot과 stale 시각을 노출한다. |
 | Redis primary | epoch, READY, spent/reserved, grant, booking permit, control | 대기 순번과 입장 권한의 서버 측 권위 | 핵심 상태 유실 의심 시 RECOVERING/PAUSED로 전환한다. |
+| 티켓 키 Redis | Ed25519 공개 검증키와 만료 TTL | `kid` 기반 검증을 위한 공개키 레지스트리 | 장애 시 대기표 발급·검증이 닫히며 공개키 유실 시 과거 토큰 복구는 보장하지 않는다. |
 | MySQL primary | seat definition/inventory, hold, order | 좌석·주문 소유권의 최종 권위 | 트랜잭션 결과만 신뢰하고 불확실한 commit은 멱등 조회한다. |
 
 ### 의존 방향
 
 ```text
 Client
-  ├─ Queue/Admission API ── Redis
+  ├─ Queue/Admission API ── 대기열 Redis
+  │                       └─ 티켓 서명·검증 ── 티켓 키 Redis
   └─ Booking API ────────── MySQL
              └───────────── Seat snapshot cache (derived)
 
@@ -182,7 +184,7 @@ version, key_id, event_id, epoch, seq,
 subject_id, ticket_id, issued_at_ms, expires_at_ms
 ```
 
-기본 서명은 키 버전이 명시된 HMAC-SHA-256이다. 알고리즘은 클라이언트가 선택하지 않는다. 사용자·이벤트·epoch·만료·`max_seq_per_epoch`를 검증한 뒤에만 Redis bitmap offset을 계산한다. ticket과 grant 원문은 URL query나 로그에 남기지 않는다.
+대기표 버전 2는 인스턴스별 메모리의 Ed25519 개인키로 서명한다. `key_id`는 공개키 SHA-256 해시의 Base64 URL-safe 표현이고, 공개키는 별도 Redis에 서명 전에 등록한다. 검증기는 해당 Redis에서 `key_id`로 공개키를 찾는다. 알고리즘은 클라이언트가 선택하지 않는다. 사용자·이벤트·epoch·만료·`max_seq_per_epoch`를 검증한 뒤에만 Redis bitmap offset을 계산한다. ticket과 grant 원문은 URL query나 로그에 남기지 않는다. 이전 HMAC 버전 1 대기표는 호환되지 않는다.
 
 발급·갱신은 `max_ticket_expiry = max(existing, issued_expiry)`를 Redis에 먼저 원자 기록한 뒤 토큰을 반환한다. 갱신은 `seq`, `ticket_id`, `subject_id`를 유지한다. 늦게 도착한 갱신 응답 때문에 클라이언트가 더 짧은 만료시각으로 되돌아가서는 안 된다.
 
@@ -352,7 +354,7 @@ SEAT_PURCHASE_LIMIT_EXCEEDED
 - `subject_id`는 사전 인증된 불투명 사용자 ID다. 개발 fixture를 제외하고 임의 HTTP header 자체를 신뢰하지 않는다.
 - ticket, grant, booking, hold의 소유자를 현재 인증 주체와 대조한다.
 - 사용자당 1석 제한은 `subject_id`의 신뢰성에 의존한다. 운영 인증이 동일 사용자를 여러 subject로 발급하면 이 제한을 우회할 수 있으므로, 운영 연동 전 subject 안정성과 계정 병합 정책을 별도로 검증한다.
-- HMAC key에는 명시적 key ID와 회전 가능한 검증 경계를 둔다. secret 값은 저장소, URL, 로그, fixture, 보고서에 넣지 않는다.
+- 각 인스턴스는 서명 가능 기간이 있는 Ed25519 키쌍을 생성한다. 개인키는 메모리에만 두고 공개키를 별도 Redis에 TTL과 함께 등록한다. 기간이 지나면 다음 발급에서 새 키를 등록하고 전환한다. 공개키는 구 대기표가 만료될 때까지 유지하며 키 Redis 장애에는 발급·검증을 닫는다. 공개키 등록 권한은 인프라 수준에서 제한한다.
 - 외부 ID의 불투명성은 authorization을 대신하지 않는다.
 - bitmap offset을 계산하기 전에 서명, 사용자, 이벤트, epoch, 만료와 seq 상한을 검증해 비정상 메모리 확장을 막는다.
 - 개발용 confirm endpoint는 운영 결제 API로 공개하지 않는다.
@@ -603,7 +605,7 @@ README와 보고서는 구현이 생긴 뒤 실제 명령을 실행해 검증한
 | HTTP router와 contract authority | M0~M1 | schema 원본 한 곳과 생성/검증 방법 결정 |
 | 프로세스 role packaging과 shutdown | M0 | API, scheduler, reaper, refresher의 ownership과 readiness 정의 |
 | 개발 인증 fixture 형식 | M1 | 운영 인증과 혼동되지 않는 synthetic subject 검증 경계 정의 |
-| signing key 주입·회전 방식 | M1 | secret 비포함 설정과 key ID 검증 경로 정의 |
+| signing key 주입·회전 방식 | M1 | 인스턴스별 Ed25519 생성·별도 공개키 Redis·key ID 검증 경로 구현. 운영 키 Redis 인증·손실 복구는 별도 검증 |
 | Redis persistence/failover profile | M4 이전 | 보존 가능한 상태와 미보장 범위를 README에 명시 |
 | 목표 hardware·동시접속·성능 판정선 | M5 이전 | 측정 환경과 제품 목표에 근거한 threshold 또는 관찰 보고 방식 결정 |
 

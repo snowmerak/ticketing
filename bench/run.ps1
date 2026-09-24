@@ -55,13 +55,13 @@ try {
 
     & docker run --rm --network $network -v "${root}:/src:ro" -w /src `
         -e "EVENT_IDS=$eventID" -e 'CAPACITY=64' -e 'ADMISSION_RATE=100000' -e 'ADMISSION_BURST=100000' `
-        -e 'REDIS_ADDR=ticketing-local-redis-1:6379' -e "MYSQL_DSN=$dsn" `
+        -e 'REDIS_ADDR=ticketing-local-redis-1:6379' -e 'TICKET_KEY_REDIS_ADDR=ticketing-local-key-redis-1:6379' -e "MYSQL_DSN=$dsn" `
         golang:1.27.1-bookworm ./bin/ticketing-linux init-state
     Assert-ExitCode 'Redis state initialization'
 
     & docker run -d --name $container --network $network -p '127.0.0.1::8080' -v "${root}:/src:ro" -w /src `
         -e "EVENT_IDS=$eventID" -e 'CAPACITY=64' -e 'ADMISSION_RATE=100000' -e 'ADMISSION_BURST=100000' `
-        -e 'REDIS_ADDR=ticketing-local-redis-1:6379' -e "MYSQL_DSN=$dsn" -e 'TICKETING_LOG_LEVEL=warn' `
+        -e 'REDIS_ADDR=ticketing-local-redis-1:6379' -e 'TICKET_KEY_REDIS_ADDR=ticketing-local-key-redis-1:6379' -e "MYSQL_DSN=$dsn" -e 'TICKETING_LOG_LEVEL=warn' `
         golang:1.27.1-bookworm ./bin/ticketing-linux serve | Out-Null
     Assert-ExitCode 'service container startup'
 

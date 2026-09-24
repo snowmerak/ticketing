@@ -20,7 +20,9 @@ import (
 	"github.com/snowmerak/ticketing/internal/booking"
 	"github.com/snowmerak/ticketing/internal/config"
 	"github.com/snowmerak/ticketing/internal/database"
+	"github.com/snowmerak/ticketing/internal/keyredis"
 	"github.com/snowmerak/ticketing/internal/queue"
+	"github.com/snowmerak/ticketing/internal/ticket"
 )
 
 func TestQ15PurchaseThenIssueMultipleQueueTicketsE2EIntegration(t *testing.T) {
@@ -53,17 +55,14 @@ func TestQ15PurchaseThenIssueMultipleQueueTicketsE2EIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bookingStore.ResetEventForTests(context.Background(), 100) })
-	signer, err := queue.NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	queueStore := queue.NewStore(redisClient, signer, cfg)
 	if err := queueStore.Initialize(ctx); err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	seatCache := booking.NewSeatCache(bookingStore, cfg.EventIDs, logger)
-	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, redisClient, logger).Handler())
+	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, logger).Handler())
 	t.Cleanup(server.Close)
 
 	entry := requestJSON(t, http.MethodPost, server.URL+"/events/100/entry", "e2e-buyer", "", map[string]any{})
@@ -115,15 +114,12 @@ func TestF01RedisUnavailableEntryFailsClosedIntegration(t *testing.T) {
 		ReadTimeout: 100 * time.Millisecond, WriteTimeout: 100 * time.Millisecond, MaxRetries: -1,
 	})
 	t.Cleanup(func() { _ = unavailableRedis.Close() })
-	signer, err := queue.NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	queueStore := queue.NewStore(unavailableRedis, signer, cfg)
 	bookingStore := booking.NewStore(db, time.Minute, 8)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	seatCache := booking.NewSeatCache(bookingStore, cfg.EventIDs, logger)
-	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, unavailableRedis, logger).Handler())
+	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, logger).Handler())
 	t.Cleanup(server.Close)
 
 	raw, err := json.Marshal(map[string]any{})
@@ -175,10 +171,7 @@ func TestF02MySQLUnavailableEntryQueuesInsteadOfDirectIntegration(t *testing.T) 
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	signer, err := queue.NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	queueStore := queue.NewStore(redisClient, signer, cfg)
 	if err := queueStore.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -186,13 +179,77 @@ func TestF02MySQLUnavailableEntryQueuesInsteadOfDirectIntegration(t *testing.T) 
 	bookingStore := booking.NewStore(db, time.Minute, 8)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	seatCache := booking.NewSeatCache(bookingStore, cfg.EventIDs, logger)
-	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, redisClient, logger).Handler())
+	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, logger).Handler())
 	t.Cleanup(server.Close)
 
 	entry := requestJSON(t, http.MethodPost, server.URL+"/events/"+strconv.FormatUint(cfg.EventIDs[0], 10)+"/entry", "mysql-down-user", "", map[string]any{})
 	if entry["kind"] != "QUEUE" || entry["ticket"] == nil || entry["booking"] != nil {
 		t.Fatalf("MySQL outage minted a direct permit: %v", entry)
 	}
+}
+
+func TestTicketKeyRedisUnavailableMakesReadinessFailClosedIntegration(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.EventIDs = []uint64{91007}
+	db, err := database.Open(cfg.MySQLDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("MySQL integration dependency is required: %v", err)
+	}
+	queueClient := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	t.Cleanup(func() { _ = queueClient.Close() })
+	if err := queueClient.Ping(ctx).Err(); err != nil {
+		t.Fatalf("queue Redis integration dependency is required: %v", err)
+	}
+	cleanupHTTPEventKeys(t, ctx, queueClient, cfg.EventIDs[0])
+	t.Cleanup(func() { cleanupHTTPEventKeys(t, context.Background(), queueClient, cfg.EventIDs[0]) })
+	keyClient := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword})
+	signer, err := ticket.NewSigner(ctx, keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
+	if err != nil {
+		t.Fatalf("ticket key Redis integration dependency is required: %v", err)
+	}
+	queueStore := queue.NewStore(queueClient, signer, cfg)
+	if err := queueStore.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyClient.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bookingStore := booking.NewStore(db, time.Minute, 8)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	seatCache := booking.NewSeatCache(bookingStore, cfg.EventIDs, logger)
+	server := httptest.NewServer(New(cfg, queueStore, bookingStore, seatCache, db, logger).Handler())
+	t.Cleanup(server.Close)
+	response, err := http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || payload["code"] != "TICKET_KEY_UNAVAILABLE" {
+		t.Fatalf("key registry outage readiness: status=%d payload=%v", response.StatusCode, payload)
+	}
+}
+
+func integrationSigner(t *testing.T, cfg config.Config) *ticket.Signer {
+	t.Helper()
+	client := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword})
+	t.Cleanup(func() { _ = client.Close() })
+	signer, err := ticket.NewSigner(context.Background(), keyredis.New(client), cfg.TicketKeyLifetime, cfg.TicketTTL)
+	if err != nil {
+		t.Fatalf("ticket key Redis integration dependency is required: %v", err)
+	}
+	return signer
 }
 
 func requestJSON(t *testing.T, method, target, subject, idempotencyKey string, body any) map[string]any {

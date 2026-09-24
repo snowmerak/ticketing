@@ -1,9 +1,9 @@
 package config
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -11,15 +11,16 @@ import (
 )
 
 type Config struct {
-	HTTPAddr       string
-	RedisAddr      string
-	RedisPassword  string
-	MySQLDSN       string
-	InstallationID string
-	AuthMode       string
-	HMACKeyID      string
-	HMACKey        []byte
-	EventIDs       []uint64
+	HTTPAddr               string
+	RedisAddr              string
+	RedisPassword          string
+	TicketKeyRedisAddr     string
+	TicketKeyRedisPassword string
+	MySQLDSN               string
+	InstallationID         string
+	AuthMode               string
+	EventIDs               []uint64
+	TicketKeyLifetime      time.Duration
 
 	TicketTTL          time.Duration
 	PollInterval       time.Duration
@@ -46,34 +47,36 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:           env("HTTP_ADDR", ":8080"),
-		RedisAddr:          env("REDIS_ADDR", "127.0.0.1:16379"),
-		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
-		MySQLDSN:           env("MYSQL_DSN", "ticketing:ticketing@tcp(127.0.0.1:13306)/ticketing?parseTime=true&loc=UTC&charset=utf8mb4&multiStatements=true"),
-		InstallationID:     env("TICKETING_INSTALLATION_ID", "ticketing-local-v1"),
-		AuthMode:           env("AUTH_MODE", "development"),
-		HMACKeyID:          env("TICKET_HMAC_KEY_ID", "local-v1"),
-		TicketTTL:          duration("TICKET_TTL", 20*time.Minute),
-		PollInterval:       duration("POLL_INTERVAL", 3*time.Second),
-		ReadyWindow:        duration("READY_WINDOW", 10*time.Second),
-		SlotWidth:          duration("SLOT_WIDTH", 2*time.Second),
-		PageBits:           uint64(integer("PAGE_BITS", 65536)),
-		SchedulerInterval:  duration("SCHEDULER_INTERVAL", 250*time.Millisecond),
-		GrantTTL:           duration("GRANT_TTL", 15*time.Second),
-		StatsInterval:      duration("STATS_INTERVAL", time.Second),
-		BookingIdleTTL:     duration("BOOKING_IDLE_TTL", 60*time.Second),
-		BookingMaxLifetime: duration("BOOKING_MAX_LIFETIME", 10*time.Minute),
-		HoldTTL:            duration("HOLD_TTL", 120*time.Second),
-		HoldReaperInterval: duration("HOLD_REAPER_INTERVAL", time.Second),
-		Capacity:           int64(integer("CAPACITY", 1000)),
-		AdmissionRate:      number("ADMISSION_RATE", 100),
-		AdmissionBurst:     number("ADMISSION_BURST", 25),
-		MaxGrantsPerTick:   integer("MAX_GRANTS_PER_TICK", 25),
-		MaxSeqPerEpoch:     uint64(integer("MAX_SEQ_PER_EPOCH", 10_000_000)),
-		DBMutationLimit:    integer("DB_MUTATION_LIMIT", 64),
-		DependencyTimeout:  duration("DEPENDENCY_TIMEOUT", 2*time.Second),
-		ShutdownTimeout:    duration("SHUTDOWN_TIMEOUT", 10*time.Second),
-		SchedulerLeaseTTL:  duration("SCHEDULER_LEASE_TTL", 2*time.Second),
+		HTTPAddr:               env("HTTP_ADDR", ":8080"),
+		RedisAddr:              env("REDIS_ADDR", "127.0.0.1:16379"),
+		RedisPassword:          os.Getenv("REDIS_PASSWORD"),
+		TicketKeyRedisAddr:     env("TICKET_KEY_REDIS_ADDR", "127.0.0.1:16380"),
+		TicketKeyRedisPassword: os.Getenv("TICKET_KEY_REDIS_PASSWORD"),
+		MySQLDSN:               env("MYSQL_DSN", "ticketing:ticketing@tcp(127.0.0.1:13306)/ticketing?parseTime=true&loc=UTC&charset=utf8mb4&multiStatements=true"),
+		InstallationID:         env("TICKETING_INSTALLATION_ID", "ticketing-local-v1"),
+		AuthMode:               env("AUTH_MODE", "development"),
+		TicketKeyLifetime:      duration("TICKET_KEY_LIFETIME", time.Hour),
+		TicketTTL:              duration("TICKET_TTL", 20*time.Minute),
+		PollInterval:           duration("POLL_INTERVAL", 3*time.Second),
+		ReadyWindow:            duration("READY_WINDOW", 10*time.Second),
+		SlotWidth:              duration("SLOT_WIDTH", 2*time.Second),
+		PageBits:               uint64(integer("PAGE_BITS", 65536)),
+		SchedulerInterval:      duration("SCHEDULER_INTERVAL", 250*time.Millisecond),
+		GrantTTL:               duration("GRANT_TTL", 15*time.Second),
+		StatsInterval:          duration("STATS_INTERVAL", time.Second),
+		BookingIdleTTL:         duration("BOOKING_IDLE_TTL", 60*time.Second),
+		BookingMaxLifetime:     duration("BOOKING_MAX_LIFETIME", 10*time.Minute),
+		HoldTTL:                duration("HOLD_TTL", 120*time.Second),
+		HoldReaperInterval:     duration("HOLD_REAPER_INTERVAL", time.Second),
+		Capacity:               int64(integer("CAPACITY", 1000)),
+		AdmissionRate:          number("ADMISSION_RATE", 100),
+		AdmissionBurst:         number("ADMISSION_BURST", 25),
+		MaxGrantsPerTick:       integer("MAX_GRANTS_PER_TICK", 25),
+		MaxSeqPerEpoch:         uint64(integer("MAX_SEQ_PER_EPOCH", 10_000_000)),
+		DBMutationLimit:        integer("DB_MUTATION_LIMIT", 64),
+		DependencyTimeout:      duration("DEPENDENCY_TIMEOUT", 2*time.Second),
+		ShutdownTimeout:        duration("SHUTDOWN_TIMEOUT", 10*time.Second),
+		SchedulerLeaseTTL:      duration("SCHEDULER_LEASE_TTL", 2*time.Second),
 	}
 
 	events, err := parseEvents(env("EVENT_IDS", "100,200"))
@@ -82,12 +85,6 @@ func Load() (Config, error) {
 	}
 	cfg.EventIDs = events
 
-	keyText := env("TICKET_HMAC_KEY", "bG9jYWwtZGV2ZWxvcG1lbnQta2V5LWNoYW5nZS1tZSE=")
-	key, err := base64.StdEncoding.DecodeString(keyText)
-	if err != nil {
-		return Config{}, fmt.Errorf("decode TICKET_HMAC_KEY: %w", err)
-	}
-	cfg.HMACKey = key
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -99,11 +96,13 @@ func (c Config) Validate() error {
 	if c.AuthMode != "development" {
 		errs = append(errs, errors.New("only AUTH_MODE=development is implemented"))
 	}
-	if len(c.HMACKey) < 32 {
-		errs = append(errs, errors.New("TICKET_HMAC_KEY must decode to at least 32 bytes"))
+	if c.InstallationID == "" || c.TicketKeyRedisAddr == "" {
+		errs = append(errs, errors.New("installation ID and ticket key Redis address are required"))
 	}
-	if c.InstallationID == "" || c.HMACKeyID == "" {
-		errs = append(errs, errors.New("installation ID and HMAC key ID are required"))
+	if c.TicketTTL <= 0 || c.TicketKeyLifetime <= 0 || c.TicketKeyLifetime > 24*time.Hour {
+		errs = append(errs, errors.New("TICKET_TTL and TICKET_KEY_LIFETIME must be positive; key lifetime must not exceed 24h"))
+	} else if c.TicketTTL > time.Duration(math.MaxInt64)-c.TicketKeyLifetime-time.Minute {
+		errs = append(errs, errors.New("ticket key retention exceeds supported duration"))
 	}
 	if c.SlotWidth <= 0 || c.ReadyWindow < c.SlotWidth {
 		errs = append(errs, errors.New("READY_WINDOW must be at least SLOT_WIDTH and both must be positive"))

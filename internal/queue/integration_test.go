@@ -41,10 +41,7 @@ func TestQ14MultipleTicketsAndRedeemIntegration(t *testing.T) {
 	cleanupEventKeys(t, ctx, client, cfg.EventIDs[0])
 	t.Cleanup(func() { cleanupEventKeys(t, context.Background(), client, cfg.EventIDs[0]) })
 
-	signer, err := NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	store := NewStore(client, signer, cfg)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -172,10 +169,7 @@ func TestA06AdmissionCapacityInvariantIntegration(t *testing.T) {
 	}
 	cleanupEventKeys(t, ctx, client, cfg.EventIDs[0])
 	t.Cleanup(func() { cleanupEventKeys(t, context.Background(), client, cfg.EventIDs[0]) })
-	signer, err := NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	store := NewStore(client, signer, cfg)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -276,10 +270,7 @@ func TestQ13ClosedEpochStateGetsBoundedCleanupTTLIntegration(t *testing.T) {
 	}
 	cleanupEventKeys(t, ctx, client, cfg.EventIDs[0])
 	t.Cleanup(func() { cleanupEventKeys(t, context.Background(), client, cfg.EventIDs[0]) })
-	signer, err := NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	store := NewStore(client, signer, cfg)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -327,10 +318,7 @@ func TestA12StaleSchedulerFenceCannotClaimIntegration(t *testing.T) {
 	}
 	cleanupEventKeys(t, ctx, client, cfg.EventIDs[0])
 	t.Cleanup(func() { cleanupEventKeys(t, context.Background(), client, cfg.EventIDs[0]) })
-	signer, err := NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	store := NewStore(client, signer, cfg)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -381,10 +369,7 @@ func TestF03MissingActiveEpochFailsRecoveringIntegration(t *testing.T) {
 	}
 	cleanupEventKeys(t, ctx, client, cfg.EventIDs[0])
 	t.Cleanup(func() { cleanupEventKeys(t, context.Background(), client, cfg.EventIDs[0]) })
-	signer, err := NewTicketSigner(cfg.HMACKeyID, map[string][]byte{cfg.HMACKeyID: cfg.HMACKey})
-	if err != nil {
-		t.Fatal(err)
-	}
+	signer := integrationSigner(t, cfg)
 	store := NewStore(client, signer, cfg)
 	if err := store.Initialize(ctx); err != nil {
 		t.Fatal(err)

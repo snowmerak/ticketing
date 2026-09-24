@@ -2,7 +2,7 @@
 
 이 문서는 [영어 README](./README.md)의 한국어 번역입니다. 영어 문서가 기준 문서입니다.
 
-Redis 기반 대기열·입장 제어와 MySQL 기반 단일 좌석 선점/모의 구매를 구현한 Go 서비스입니다.
+Redis 기반 대기열·입장 제어와 MySQL 기반 단일 좌석 선점/모의 구매를 구현한 Go 서비스입니다. 각 인스턴스가 메모리의 Ed25519 키로 대기표를 서명하고 별도 Redis에 공개 검증키를 저장합니다.
 
 핵심 제품 규칙은 두 가지입니다.
 
@@ -30,7 +30,7 @@ Invoke-RestMethod http://127.0.0.1:8080/readyz
 
 `migrate`와 `init-state`는 명시적 절차입니다. 일반 `serve`는 Redis 권한 상태를 자동 생성하거나 복구하지 않으며 installation marker가 없으면 시작을 거부합니다.
 
-기본 설정은 [config.go](./internal/config/config.go)에 있고, 개발용 예시는 [.env.example](./.env.example)에 있습니다. 전체 설정과 적용 시점은 [설정 참조 문서](./docs/configuration.md)를 보세요. 이 애플리케이션은 `.env`를 자동으로 읽지 않으므로 필요한 값은 프로세스 환경 변수로 주입해야 합니다. `TICKET_HMAC_KEY` 기본값은 오직 로컬 개발 fixture입니다.
+기본 설정은 [config.go](./internal/config/config.go)에 있고, 개발용 예시는 [.env.example](./.env.example)에 있습니다. 전체 설정과 적용 시점은 [설정 참조 문서](./docs/configuration.md)를 보세요. 이 애플리케이션은 `.env`를 자동으로 읽지 않으므로 필요한 값은 프로세스 환경 변수로 주입해야 합니다. `serve`에는 대기열 Redis와 별도 티켓 키 Redis가 모두 필요하며, `migrate`·`init-state`는 서명키를 등록하지 않습니다.
 
 요청 로그를 줄이려면 다음처럼 실행할 수 있습니다.
 
@@ -48,7 +48,7 @@ go test ./...
 go vet ./...
 ```
 
-실제 Redis/MySQL 통합 테스트는 먼저 Compose 의존성을 띄운 뒤 실행합니다. 의존성이 없으면 테스트는 skip으로 성공하지 않고 실패합니다.
+실제 Redis 두 개와 MySQL의 통합 테스트는 먼저 Compose 의존성을 띄운 뒤 실행합니다. 의존성이 없으면 테스트는 skip으로 성공하지 않고 실패합니다.
 
 ```powershell
 docker compose up -d --wait
@@ -56,19 +56,20 @@ go run ./cmd/ticketing migrate
 go test -count=1 -tags=integration ./...
 ```
 
-실제 바이너리와 HTTP 포트, admission worker를 포함한 전체 API E2E는 별도 명령으로 실행합니다. 테스트가 임의의 전용 이벤트를 만들고 종료 시 그 이벤트의 MySQL/Redis 데이터만 정리합니다. 기존 이벤트 100/200의 좌석·주문은 사용하지 않습니다.
+실제 바이너리와 HTTP 포트, admission worker를 포함한 전체 API E2E는 별도 명령으로 실행합니다. 테스트가 임의의 전용 이벤트를 만들고 종료 시 그 이벤트의 MySQL/대기열 Redis 데이터만 정리합니다. 별도 키 Redis의 공개키는 TTL이 끝날 때까지 남습니다. 기존 이벤트 100/200의 좌석·주문은 사용하지 않습니다.
 
 ```powershell
 go test -tags=e2e -count=1 -v ./e2e
 ```
 
-이 테스트는 DIRECT 입장으로 capacity 점유 → 동일 사용자의 복수 QUEUE 대기표 → 서버 프로세스 재시작 → heartbeat/grant/redeem → 좌석 조회·선점·취소·자동배정·확정 → 구매 후 새 대기표와 새 booking permit 발급 → 다른 permit으로도 추가 구매 거절을 검증합니다. 브라우저 JavaScript 실행과 실제 결제는 포함하지 않습니다.
+이 테스트는 DIRECT 입장으로 capacity 점유 → 동일 사용자의 복수 QUEUE 대기표 → 서버 프로세스 재시작과 이전 인스턴스 공개키 조회 → heartbeat/grant/redeem → 좌석 조회·선점·취소·자동배정·확정 → 구매 후 새 대기표와 새 booking permit 발급 → 다른 permit으로도 추가 구매 거절을 검증합니다. 브라우저 JavaScript 실행과 실제 결제는 포함하지 않습니다.
 
 Windows 호스트에 C 컴파일러가 없을 때도 Linux 컨테이너에서 race detector를 실행할 수 있습니다.
 
 ```powershell
 docker run --rm -v "${PWD}:/src" -w /src `
   -e REDIS_ADDR=host.docker.internal:16379 `
+  -e TICKET_KEY_REDIS_ADDR=host.docker.internal:16380 `
   -e "MYSQL_DSN=ticketing:ticketing@tcp(host.docker.internal:13306)/ticketing?parseTime=true&loc=UTC&charset=utf8mb4&multiStatements=true" `
   golang:1.27.1-bookworm go test -race -count=1 -tags=integration ./...
 ```
@@ -101,10 +102,10 @@ powershell -File .\bench\run.ps1 -VUs 4 -Iterations 100 -WarmupIterations 5
 
 ## 상태와 복구
 
-- Redis는 `noeviction`과 AOF를 사용합니다. epoch/meta/spent/permit 손실이 의심되면 자동 DIRECT로 우회하지 않고 `QUEUE_RECOVERING`으로 닫힙니다.
+- 두 Redis 모두 `noeviction`과 AOF를 사용합니다. 대기열 epoch/meta/spent/permit 손실이 의심되면 자동 DIRECT로 우회하지 않고 `QUEUE_RECOVERING`으로 닫힙니다. 키 Redis 장애는 대기표 발급·검증과 readiness를 중단시키고, 이전 공개키 손실은 유효 대기표를 무효화할 수 있습니다.
 - MySQL이 불가하면 Queue API는 직접 booking permit을 만들지 않고 대기표 경로로 전환합니다. 좌석 변경은 실패합니다.
 - `init-state`는 최초 설치 절차이며 부분 손실을 정상 상태로 덮어쓰는 복구 명령이 아닙니다.
-- 로컬 데이터를 완전히 버리고 다시 시작할 때만 `docker compose down -v`를 사용할 수 있습니다. 이 명령은 로컬 Redis/MySQL 볼륨을 영구 삭제하므로 그 다음 `up`, `migrate`, `init-state`를 다시 실행해야 합니다.
+- 로컬 데이터를 완전히 버리고 다시 시작할 때만 `docker compose down -v`를 사용할 수 있습니다. 이 명령은 두 Redis와 MySQL의 로컬 볼륨을 영구 삭제하므로 그 다음 `up`, `migrate`, `init-state`를 다시 실행해야 합니다.
 
 ## 계약과 권위
 

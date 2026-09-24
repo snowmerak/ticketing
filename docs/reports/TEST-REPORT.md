@@ -1,5 +1,21 @@
 # Test Report — 2026-09-24
 
+> 아래의 기존 revision·상세 ID별 결과는 Ed25519/별도 티켓 키 Redis 도입 전의 기록이다. 새 서명 경로의 현재 검증은 다음 절에 별도로 기록하며, 과거 결과를 새 코드의 증거로 일반화하지 않는다.
+
+## Ed25519 전환 후 추가 검증
+
+같은 Windows 개발 노트북에서 Compose 대기열 Redis·티켓 키 Redis·MySQL을 띄우고 `go run ./cmd/ticketing migrate` 후 다음을 실행했다.
+
+| 명령 | 결과와 범위 |
+|---|---|
+| `go test ./...` / `go vet ./...` | PASS, 기본 단위 테스트·정적 검사 |
+| `go test -count=1 -tags=integration ./...` | PASS, 실제 두 Redis와 MySQL. 공개키 TTL·손상 거부, 키 Redis 중단 시 readiness 503 포함 |
+| `go test -count=1 -tags=e2e ./e2e` | PASS, 실제 바이너리 재시작 후 이전 인스턴스가 발급한 버전 2 대기표를 새 인스턴스가 검증해 구매 완료 |
+| Linux 컨테이너 `go test -race -count=1 ./internal/ticket` | PASS, 동시 키 교체 포함한 서명기 단위 범위 |
+| Linux 컨테이너 `go test -race -count=1 -tags=integration ./...` | PASS, 실제 두 Redis·MySQL 연동과 동시성 범위 |
+
+기존 HMAC 버전 1의 동시 수용, 키 Redis failover·공개키 손실 복구, 운영 ACL/인증, 변경 후 k6 성능은 검증하지 않았다. 버전 1 대기표는 의도적으로 거부한다.
+
 ## 결론
 
 구현된 단위 테스트, 실제 Redis/MySQL 통합 테스트, HTTP E2E와 race detector는 통과했습니다. 특히 이벤트별 사용자당 1석 제한, 동일 사용자의 복수 대기표와 구매 후 대기표 발급은 실제 의존성에서 확인됐습니다.
