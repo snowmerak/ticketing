@@ -8,7 +8,7 @@
 
 > 최신 범위 결정(2026-09-24): 한 사용자는 이벤트별로 좌석을 최대 1석만 구매할 수 있다. 반면 같은 사용자의 대기표 개수는 제한하지 않으며, 이미 좌석을 구매한 뒤에도 새 대기표를 발급받을 수 있다. 이 결정은 기준 입력의 다중 좌석 hold와 `max_seats_per_hold=4`보다 우선한다.
 
-이 문서는 프로젝트의 현재 구현 방향과 전달 순서를 설명하는 상위 지도다. 정확한 API 스키마, Redis Lua 계약, SQL migration, 설정 스키마가 저장소에 추가되면 해당 파일이 세부 계약의 권위 있는 원본이 되고, 이 문서는 그 위치와 관계만 설명한다. 테스트 통과나 처리량 수치를 기록하는 문서가 아니며, 실제 결과는 `docs/reports/TEST-REPORT.md`와 `docs/reports/BENCHMARK-REPORT.md`가 소유한다.
+이 문서는 프로젝트의 현재 구현 방향과 전달 순서를 설명하는 상위 지도다. 현재 코드의 실행 구성·데이터 권위·장애 경계는 [architecture.md](./architecture.md)가 설명한다. 정확한 API 스키마, Redis Lua 계약, SQL migration, 설정 스키마는 해당 소스가 권위 있는 원본이며, 이 문서는 그 위치와 관계만 설명한다. 테스트 통과나 처리량 수치를 기록하는 문서가 아니며, 실제 결과는 `docs/reports/TEST-REPORT.md`와 `docs/reports/BENCHMARK-REPORT.md`가 소유한다.
 
 ## 1. 현재 기준선
 

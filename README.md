@@ -110,6 +110,7 @@ powershell -File .\bench\run.ps1 -VUs 4 -Iterations 100 -WarmupIterations 5
 - HTTP route와 최종 status mapping: [server.go](./internal/httpapi/server.go)
 - 좌석·주문 권위: [migrations](./migrations)와 [booking store](./internal/booking/store.go)
 - Queue 원자 전이: [Redis Lua](./redis/lua)
+- 현재 구현의 구성·데이터 권위·장애 경계: [architecture.md](./docs/architecture.md)
 - 상위 설계와 한계: [blueprint.md](./docs/blueprint.md)
 
 ## 운영 전 남은 범위
