@@ -1,0 +1,17 @@
+{
+  "description": "Short local observation profile; not a production capacity target.",
+  "profiles": [
+    {
+      "name": "entry",
+      "command": "go run ./cmd/loadtest -profile entry -warmup 2s -duration 10s -concurrency 16"
+    },
+    {
+      "name": "hold-auto",
+      "command": "go run ./cmd/loadtest -profile hold-auto -warmup 2s -duration 10s -concurrency 8"
+    },
+    {
+      "name": "hold-hot",
+      "command": "go run ./cmd/loadtest -profile hold-hot -warmup 2s -duration 10s -concurrency 8 -seat 1"
+    }
+  ]
+}
