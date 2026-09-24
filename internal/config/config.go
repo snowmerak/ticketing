@@ -104,6 +104,9 @@ func (c Config) Validate() error {
 	} else if c.TicketTTL > time.Duration(math.MaxInt64)-c.TicketKeyLifetime-time.Minute {
 		errs = append(errs, errors.New("ticket key retention exceeds supported duration"))
 	}
+	if c.DependencyTimeout <= 0 {
+		errs = append(errs, errors.New("DEPENDENCY_TIMEOUT must be positive"))
+	}
 	if c.SlotWidth <= 0 || c.ReadyWindow < c.SlotWidth {
 		errs = append(errs, errors.New("READY_WINDOW must be at least SLOT_WIDTH and both must be positive"))
 	}

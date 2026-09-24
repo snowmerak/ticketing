@@ -197,7 +197,7 @@ func (s *Store) Entry(ctx context.Context, eventID uint64, subjectID string, all
 		keys := []string{s.controlKey(eventID), s.activeEpochKey(eventID), s.metaKey(eventID, epoch), s.bookingsKey(eventID), s.bookingExpiryKey(eventID)}
 		args := []any{
 			epoch, subjectID, bookingID, s.cfg.BookingIdleTTL.Milliseconds(), s.cfg.TicketTTL.Milliseconds(), boolInt(allowDirect),
-			s.cfg.BookingMaxLifetime.Milliseconds(), s.cfg.MaxSeqPerEpoch,
+			s.cfg.BookingMaxLifetime.Milliseconds(), s.cfg.MaxSeqPerEpoch, boolInt(s.signer.CanSign()),
 		}
 		result, err := s.entryScript.Run(ctx, s.client, keys, args...).Result()
 		if err != nil {
@@ -216,6 +216,8 @@ func (s *Store) Entry(ctx context.Context, eventID uint64, subjectID string, all
 			return EntryResult{}, apierr.ErrEventClosed
 		case "CAPACITY_REACHED":
 			return EntryResult{}, apierr.New(429, "QUEUE_CAPACITY_REACHED", "the queue sequence limit was reached", false)
+		case "KEY_UNAVAILABLE":
+			return EntryResult{}, apierr.New(503, "TICKET_KEY_UNAVAILABLE", "ticket verification keys are unavailable", true)
 		case "DIRECT":
 			idle, _ := strconv.ParseInt(values[2], 10, 64)
 			absolute, _ := strconv.ParseInt(values[3], 10, 64)

@@ -30,7 +30,7 @@ Invoke-RestMethod http://127.0.0.1:8080/readyz
 
 `migrate`와 `init-state`는 명시적 절차입니다. 일반 `serve`는 Redis 권한 상태를 자동 생성하거나 복구하지 않으며 installation marker가 없으면 시작을 거부합니다.
 
-기본 설정은 [config.go](./internal/config/config.go)에 있고, 개발용 예시는 [.env.example](./.env.example)에 있습니다. 전체 설정과 적용 시점은 [설정 참조 문서](./docs/configuration.md)를 보세요. 이 애플리케이션은 `.env`를 자동으로 읽지 않으므로 필요한 값은 프로세스 환경 변수로 주입해야 합니다. `serve`에는 대기열 Redis와 별도 티켓 키 Redis가 모두 필요하며, `migrate`·`init-state`는 서명키를 등록하지 않습니다.
+기본 설정은 [config.go](./internal/config/config.go)에 있고, 개발용 예시는 [.env.example](./.env.example)에 있습니다. 전체 설정과 적용 시점은 [설정 참조 문서](./docs/configuration.md)를 보세요. 이 애플리케이션은 `.env`를 자동으로 읽지 않으므로 필요한 값은 프로세스 환경 변수로 주입해야 합니다. `serve`는 대기열 Redis와 MySQL이 있어야 시작합니다. 별도 티켓 키 Redis가 불가하면 HTTP는 시작하되 unready 상태에서 백그라운드 키 등록을 재시도합니다. 등록 전 서명 필요 요청은 503이며, 직접 입장은 가능합니다. `migrate`·`init-state`는 서명키를 등록하지 않습니다.
 
 요청 로그를 줄이려면 다음처럼 실행할 수 있습니다.
 

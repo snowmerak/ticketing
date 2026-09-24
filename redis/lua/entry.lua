@@ -24,6 +24,9 @@ if active_epoch then
     redis.call('HSET', KEYS[1], 'mode', 'RECOVERING')
     return {'RECOVERING', 'active_meta_missing'}
   end
+  if ARGV[9] ~= '1' then
+    return {'KEY_UNAVAILABLE'}
+  end
   local seq = redis.call('HINCRBY', KEYS[3], 'next_seq', 1) - 1
   if seq > tonumber(ARGV[8]) then
     return {'CAPACITY_REACHED'}
@@ -64,6 +67,10 @@ if allow_direct and not paused and active + reserved < capacity and tokens >= 1 
   redis.call('HINCRBY', KEYS[1], 'active_count', 1)
   redis.call('HSET', KEYS[1], 'rate_tokens', tokens - 1, 'rate_token_at_ms', token_at)
   return {'DIRECT', ARGV[3], tostring(idle_expiry), tostring(absolute_expiry), tostring(now_ms)}
+end
+
+if ARGV[9] ~= '1' then
+  return {'KEY_UNAVAILABLE'}
 end
 
 local expires_at = now_ms + tonumber(ARGV[5])

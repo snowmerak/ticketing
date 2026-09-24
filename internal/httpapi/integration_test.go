@@ -211,10 +211,15 @@ func TestTicketKeyRedisUnavailableMakesReadinessFailClosedIntegration(t *testing
 	cleanupHTTPEventKeys(t, ctx, queueClient, cfg.EventIDs[0])
 	t.Cleanup(func() { cleanupHTTPEventKeys(t, context.Background(), queueClient, cfg.EventIDs[0]) })
 	keyClient := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword})
-	signer, err := ticket.NewSigner(ctx, keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
+	signer, err := ticket.NewSigner(keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
 	if err != nil {
 		t.Fatalf("ticket key Redis integration dependency is required: %v", err)
 	}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); signer.Run(runCtx, cfg.DependencyTimeout, nil) }()
+	t.Cleanup(func() { stop(); <-done })
+	waitSignerReady(t, signer, cfg.DependencyTimeout)
 	queueStore := queue.NewStore(queueClient, signer, cfg)
 	if err := queueStore.Initialize(ctx); err != nil {
 		t.Fatal(err)
@@ -245,11 +250,31 @@ func integrationSigner(t *testing.T, cfg config.Config) *ticket.Signer {
 	t.Helper()
 	client := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword})
 	t.Cleanup(func() { _ = client.Close() })
-	signer, err := ticket.NewSigner(context.Background(), keyredis.New(client), cfg.TicketKeyLifetime, cfg.TicketTTL)
+	signer, err := ticket.NewSigner(keyredis.New(client), cfg.TicketKeyLifetime, cfg.TicketTTL)
 	if err != nil {
 		t.Fatalf("ticket key Redis integration dependency is required: %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); signer.Run(ctx, cfg.DependencyTimeout, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitSignerReady(t, signer, cfg.DependencyTimeout)
 	return signer
+}
+
+func waitSignerReady(t *testing.T, signer *ticket.Signer, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		err := signer.Ready(ctx)
+		cancel()
+		if err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("ticket signer did not become ready")
 }
 
 func requestJSON(t *testing.T, method, target, subject, idempotencyKey string, body any) map[string]any {

@@ -20,7 +20,8 @@ func TestValidateRejectsGrantShorterThanPoll(t *testing.T) {
 		SlotWidth: time.Second, ReadyWindow: time.Second, PageBits: 8,
 		PollInterval: 3 * time.Second, GrantTTL: 3 * time.Second,
 		BookingIdleTTL: time.Second, BookingMaxLifetime: time.Second,
-		Capacity: 1, AdmissionRate: 1, AdmissionBurst: 1, MaxGrantsPerTick: 1, EventIDs: []uint64{1},
+		DependencyTimeout: time.Second,
+		Capacity:          1, AdmissionRate: 1, AdmissionBurst: 1, MaxGrantsPerTick: 1, EventIDs: []uint64{1},
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() succeeded with grant TTL no longer than polling interval")
@@ -42,5 +43,16 @@ func TestValidateRejectsInvalidTicketKeyRetention(t *testing.T) {
 	cfg.TicketKeyLifetime = 25 * time.Hour
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() accepted a key lifetime over 24 hours")
+	}
+}
+
+func TestValidateRejectsNonpositiveDependencyTimeout(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DependencyTimeout = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() accepted a zero dependency timeout")
 	}
 }

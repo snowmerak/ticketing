@@ -30,7 +30,7 @@ Invoke-RestMethod http://127.0.0.1:8080/readyz
 
 `migrate` and `init-state` are explicit setup steps. A normal `serve` does not create or recover Redis authority state automatically; it refuses to start if the installation marker is missing.
 
-Defaults are in [config.go](./internal/config/config.go), and development examples are in [.env.example](./.env.example). See the [configuration reference (Korean)](./docs/configuration.md) for all settings and their lifecycle. The application does not load `.env` automatically, so pass any required values through the process environment. `serve` needs both the queue Redis and the separate ticket-key Redis; `migrate` and `init-state` do not register signing keys.
+Defaults are in [config.go](./internal/config/config.go), and development examples are in [.env.example](./.env.example). See the [configuration reference (Korean)](./docs/configuration.md) for all settings and their lifecycle. The application does not load `.env` automatically, so pass any required values through the process environment. `serve` requires the queue Redis and MySQL to start; if the separate ticket-key Redis is unavailable, it starts HTTP but stays unready and retries key registration in the background. Ticket signing returns 503 until a key is registered; direct admission can still work. `migrate` and `init-state` do not register signing keys.
 
 To reduce request logging:
 

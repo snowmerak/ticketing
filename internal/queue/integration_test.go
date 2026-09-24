@@ -14,7 +14,70 @@ import (
 
 	"github.com/snowmerak/ticketing/internal/apierr"
 	"github.com/snowmerak/ticketing/internal/config"
+	"github.com/snowmerak/ticketing/internal/keyredis"
+	"github.com/snowmerak/ticketing/internal/ticket"
 )
+
+func TestEntryWithoutRegisteredKeyPreservesDirectAdmissionAndQueueSequenceIntegration(t *testing.T) {
+	ctx := context.Background()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.EventIDs = []uint64{91011}
+	client := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword})
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Ping(ctx).Err(); err != nil {
+		t.Fatalf("Redis integration dependency is required: %v", err)
+	}
+	cleanupEventKeys(t, ctx, client, cfg.EventIDs[0])
+	t.Cleanup(func() { cleanupEventKeys(t, context.Background(), client, cfg.EventIDs[0]) })
+	keyClient := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword})
+	t.Cleanup(func() { _ = keyClient.Close() })
+	signer, err := ticket.NewSigner(keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(client, signer, cfg)
+	if err := store.Initialize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	direct, err := store.Entry(ctx, cfg.EventIDs[0], "direct-user", true)
+	if err != nil || direct.Kind != "DIRECT" {
+		t.Fatalf("direct entry without key: kind=%q err=%v", direct.Kind, err)
+	}
+	if err := client.HSet(ctx, store.controlKey(cfg.EventIDs[0]), "pause", 1).Err(); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_, err := store.Entry(ctx, cfg.EventIDs[0], "queued-user", true)
+		if apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+			t.Fatalf("queued entry without key = %v", err)
+		}
+	}
+	active, err := store.ActiveEpoch(ctx, cfg.EventIDs[0])
+	if err != nil || active != "" {
+		t.Fatalf("failed issuance created queue epoch: epoch=%q err=%v", active, err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); signer.Run(runCtx, cfg.DependencyTimeout, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if signer.Ready(ctx) == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := signer.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := store.Entry(ctx, cfg.EventIDs[0], "queued-user", true)
+	if err != nil || queued.Kind != "QUEUE" || queued.Claims.Seq != 0 {
+		t.Fatalf("first queued entry after recovery: result=%+v err=%v", queued, err)
+	}
+}
 
 func TestQ14MultipleTicketsAndRedeemIntegration(t *testing.T) {
 	ctx := context.Background()

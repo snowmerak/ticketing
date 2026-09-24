@@ -1,6 +1,19 @@
 # Test Report — 2026-09-24
 
-> 아래의 기존 revision·상세 ID별 결과는 Ed25519/별도 티켓 키 Redis 도입 전의 기록이다. 새 서명 경로의 현재 검증은 다음 절에 별도로 기록하며, 과거 결과를 새 코드의 증거로 일반화하지 않는다.
+## 백그라운드 키 등록·회전 변경 검증
+
+Windows 개발 노트북의 로컬 Compose 대기열 Redis·키 Redis·MySQL을 사용해 변경 working tree에서 실행했다.
+
+| 명령 | 결과와 확인 범위 |
+|---|---|
+| `go test -count=1 ./...` / `go vet ./...` | PASS. 읽기 전용 readiness·발급, 미등록/만료 키의 503, 같은 `kid` 재시도와 복구, 백그라운드 회전·기존 토큰 검증, 현재 공개키 재등록(메모리 레지스트리) |
+| `go test -count=1 -tags=integration ./...` | PASS. 실제 두 Redis·MySQL, 키 미등록 중 직접 입장 유지·대기 순번 미소비, 등록 후 첫 순번 발급, HTTP readiness의 키 Redis 장애 503 |
+| `go test -count=1 -tags=e2e ./e2e` | PASS. 실제 서비스 바이너리 시작·재시작과 전체 구매 경로 |
+| `golang:1.27.1-bookworm` 컨테이너 `go test -race -count=1 -tags=integration ./...` | PASS. 변경된 키 등록 루프와 실제 Redis/MySQL 통합 경로의 race detector |
+
+실제 프로세스 실행 중 키 Redis를 중단·복구하는 장애 주입과 키 Redis failover/과거 공개키 손실 복구는 수행하지 않았다. 현재 공개키 재등록의 자동 복구는 메모리 레지스트리 단위 테스트까지의 증거다.
+
+> 아래의 기존 revision·상세 ID별 결과는 Ed25519/별도 티켓 키 Redis 도입 전의 기록이다. 현재 검증은 위 절과 바로 다음 절에 구분해 기록하며, 과거 결과를 새 코드의 증거로 일반화하지 않는다.
 
 ## Ed25519 전환 후 추가 검증
 

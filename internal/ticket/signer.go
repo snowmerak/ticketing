@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	mrand "math/rand/v2"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,9 @@ import (
 const Version = 2
 const keyRetentionGrace = time.Minute
 const maxTokenBytes = 4096
+const keyAuditInterval = 5 * time.Second
+const initialKeyRetry = 200 * time.Millisecond
+const maxKeyRetry = 5 * time.Second
 
 type Claims struct {
 	Version     int    `json:"v"`
@@ -51,18 +55,12 @@ type Signer struct {
 	current   *signingKey
 }
 
-// NewSigner generates a process-local key and publishes its public half before use.
-func NewSigner(ctx context.Context, registry Registry, lifetime, ticketTTL time.Duration) (*Signer, error) {
+// NewSigner creates an unready signer. Run owns publication and rotation.
+func NewSigner(registry Registry, lifetime, ticketTTL time.Duration) (*Signer, error) {
 	if registry == nil || lifetime <= 0 || ticketTTL <= 0 || lifetime > 24*time.Hour || ticketTTL > time.Duration(math.MaxInt64)-lifetime-keyRetentionGrace {
 		return nil, errors.New("invalid ticket signer configuration")
 	}
-	s := &Signer{registry: registry, lifetime: lifetime, ticketTTL: ticketTTL}
-	key, err := s.generateAndPublish(ctx)
-	if err != nil {
-		return nil, err
-	}
-	s.current = key
-	return s, nil
+	return &Signer{registry: registry, lifetime: lifetime, ticketTTL: ticketTTL}, nil
 }
 
 func KeyID(publicKey ed25519.PublicKey) string {
@@ -70,7 +68,7 @@ func KeyID(publicKey ed25519.PublicKey) string {
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
-func (s *Signer) generateAndPublish(ctx context.Context) (*signingKey, error) {
+func (s *Signer) generateKey() (*signingKey, error) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
@@ -79,42 +77,144 @@ func (s *Signer) generateAndPublish(ctx context.Context) (*signingKey, error) {
 		id: KeyID(publicKey), public: publicKey, private: privateKey,
 		signUntil: time.Now().Add(s.lifetime),
 	}
-	retention := s.lifetime + s.ticketTTL + keyRetentionGrace
-	if err := s.registry.Publish(ctx, key.id, key.public, retention); err != nil {
-		return nil, registryUnavailable(err)
+	return key, nil
+}
+
+// Run continuously reconciles the local signing key with the registry. Only one
+// goroutine may run it per signer; requests and readiness never publish keys.
+// report is called once when publication starts failing and once on recovery.
+func (s *Signer) Run(ctx context.Context, attemptTimeout time.Duration, report func(error)) {
+	if attemptTimeout <= 0 {
+		panic("ticket signer requires a positive publication timeout")
+	}
+	var pending *signingKey
+	retry := initialKeyRetry
+	failed := false
+	for ctx.Err() == nil {
+		current := s.currentKey()
+		now := time.Now()
+		if pending != nil && !now.Before(pending.signUntil) {
+			pending = nil
+		}
+		if pending == nil {
+			if current != nil && now.Before(current.signUntil.Add(-s.rotationLead())) {
+				wait := min(time.Until(current.signUntil.Add(-s.rotationLead())), keyAuditInterval)
+				if !waitFor(ctx, wait) {
+					return
+				}
+				attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+				err := s.checkPublished(attemptCtx, current)
+				cancel()
+				if err == nil {
+					continue
+				}
+				pending = current // Restore a lost active public key with the same ID.
+			} else {
+				var err error
+				pending, err = s.generateKey()
+				if err != nil {
+					if !failed && report != nil {
+						report(err)
+					}
+					failed = true
+					if !waitFor(ctx, jitter(retry)) {
+						return
+					}
+					retry = min(retry*2, maxKeyRetry)
+					continue
+				}
+			}
+		}
+		retention := time.Until(pending.signUntil) + s.ticketTTL + keyRetentionGrace
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		err := s.registry.Publish(attemptCtx, pending.id, pending.public, retention)
+		cancel()
+		if err == nil && time.Now().Before(pending.signUntil) {
+			if pending != current {
+				s.mu.Lock()
+				s.current = pending
+				s.mu.Unlock()
+			}
+			pending = nil
+			retry = initialKeyRetry
+			if failed && report != nil {
+				report(nil)
+			}
+			failed = false
+			continue
+		}
+		if err == nil {
+			pending = nil // Publication finished after this key's signing window.
+			if !waitFor(ctx, jitter(initialKeyRetry)) {
+				return
+			}
+			continue
+		}
+		if !failed && report != nil {
+			report(registryUnavailable(err))
+		}
+		failed = true
+		if !waitFor(ctx, jitter(retry)) {
+			return
+		}
+		retry = min(retry*2, maxKeyRetry)
+	}
+}
+
+func (s *Signer) rotationLead() time.Duration {
+	return min(s.lifetime/10, time.Minute)
+}
+
+func waitFor(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(max(delay, 0))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func jitter(delay time.Duration) time.Duration {
+	return delay/2 + time.Duration(mrand.Int64N(int64(delay/2)+1))
+}
+
+func (s *Signer) currentKey() *signingKey {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.current
+}
+
+func (s *Signer) active() (*signingKey, error) {
+	key := s.currentKey()
+	if key == nil || !time.Now().Before(key.signUntil) {
+		return nil, registryUnavailable(errors.New("no registered signing key is active"))
 	}
 	return key, nil
 }
 
-func (s *Signer) active(ctx context.Context) (*signingKey, error) {
-	s.mu.RLock()
-	key := s.current
-	if time.Now().Before(key.signUntil) {
-		s.mu.RUnlock()
-		return key, nil
-	}
-	s.mu.RUnlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if time.Now().Before(s.current.signUntil) {
-		return s.current, nil
-	}
-	key, err := s.generateAndPublish(ctx)
-	if err != nil {
-		return nil, err
-	}
-	s.current = key
-	return key, nil
+// CanSign reports only local key availability, without registry I/O. A request
+// must still call New or Renew to confirm publication before signing.
+func (s *Signer) CanSign() bool {
+	_, err := s.active()
+	return err == nil
 }
 
 // Ready checks the active verification record; issuing must not succeed on a key
 // that other instances cannot look up.
 func (s *Signer) Ready(ctx context.Context) error {
-	key, err := s.active(ctx)
+	key, err := s.active()
 	if err != nil {
 		return err
 	}
-	return s.checkPublished(ctx, key)
+	if err := s.checkPublished(ctx, key); err != nil {
+		return err
+	}
+	if !time.Now().Before(key.signUntil) {
+		return registryUnavailable(errors.New("signing key expired during publication check"))
+	}
+	return nil
 }
 
 func (s *Signer) checkPublished(ctx context.Context, key *signingKey) error {
@@ -153,12 +253,15 @@ func (s *Signer) Renew(ctx context.Context, claims Claims, now time.Time, ttl ti
 }
 
 func (s *Signer) sign(ctx context.Context, claims Claims) (string, Claims, error) {
-	key, err := s.active(ctx)
+	key, err := s.active()
 	if err != nil {
 		return "", Claims{}, err
 	}
 	if err := s.checkPublished(ctx, key); err != nil {
 		return "", Claims{}, err
+	}
+	if !time.Now().Before(key.signUntil) {
+		return "", Claims{}, registryUnavailable(errors.New("signing key expired during publication check"))
 	}
 	claims.Version = Version
 	claims.KeyID = key.id

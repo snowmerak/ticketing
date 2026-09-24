@@ -16,6 +16,7 @@ type memoryRegistry struct {
 	keys       map[string]ed25519.PublicKey
 	retentions map[string]time.Duration
 	fail       bool
+	attempts   []string
 }
 
 func newMemoryRegistry() *memoryRegistry {
@@ -25,6 +26,7 @@ func newMemoryRegistry() *memoryRegistry {
 func (r *memoryRegistry) Publish(_ context.Context, id string, key ed25519.PublicKey, retention time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.attempts = append(r.attempts, id)
 	if r.fail {
 		return errors.New("registry down")
 	}
@@ -51,11 +53,40 @@ func (r *memoryRegistry) Lookup(_ context.Context, id string) (ed25519.PublicKey
 
 func testSigner(t *testing.T, registry Registry) *Signer {
 	t.Helper()
-	signer, err := NewSigner(context.Background(), registry, time.Hour, 20*time.Minute)
+	signer, err := NewSigner(registry, time.Hour, 20*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		signer.Run(ctx, 50*time.Millisecond, nil)
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+	waitReady(t, signer)
 	return signer
+}
+
+func waitReady(t *testing.T, signer *Signer) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		err := signer.Ready(ctx)
+		cancel()
+		if err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("signer did not become ready")
+}
+
+func (r *memoryRegistry) setFail(value bool) {
+	r.mu.Lock()
+	r.fail = value
+	r.mu.Unlock()
 }
 
 func TestTicketRoundTripAndBindingAcrossInstances(t *testing.T) {
@@ -104,21 +135,32 @@ func TestTicketRejectsTamperExpiryAndLargeSeq(t *testing.T) {
 	}
 }
 
-func TestRotationKeepsPreviousPublicKeyForVerification(t *testing.T) {
+func TestBackgroundRotationKeepsPreviousPublicKeyForVerification(t *testing.T) {
 	ctx := context.Background()
 	registry := newMemoryRegistry()
-	signer := testSigner(t, registry)
+	signer, err := NewSigner(registry, 200*time.Millisecond, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); signer.Run(runCtx, 50*time.Millisecond, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitReady(t, signer)
 	now := time.Now()
 	oldToken, oldClaims, err := signer.New(ctx, 100, "epoch", 7, "user-1", now, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer.mu.Lock()
-	signer.current.signUntil = time.Now().Add(-time.Second)
-	signer.mu.Unlock()
-	newToken, newClaims, err := signer.Renew(ctx, oldClaims, now.Add(time.Second), time.Minute)
-	if err != nil {
-		t.Fatal(err)
+	var newToken string
+	var newClaims Claims
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		newToken, newClaims, err = signer.Renew(ctx, oldClaims, time.Now(), time.Minute)
+		if err == nil && newClaims.KeyID != oldClaims.KeyID {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if oldClaims.KeyID == newClaims.KeyID || oldToken == newToken {
 		t.Fatal("rotation did not replace the signing key")
@@ -129,7 +171,7 @@ func TestRotationKeepsPreviousPublicKeyForVerification(t *testing.T) {
 	if _, err := signer.Verify(ctx, newToken, "user-1", 100, 100, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if registry.retentions[oldClaims.KeyID] != time.Hour+20*time.Minute+keyRetentionGrace {
+	if registry.retentions[oldClaims.KeyID] < time.Minute+keyRetentionGrace || registry.retentions[oldClaims.KeyID] > 200*time.Millisecond+time.Minute+keyRetentionGrace {
 		t.Fatal("old verification key retention does not cover signing and ticket lifetimes")
 	}
 }
@@ -143,7 +185,7 @@ func TestRegistryOutageFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry.fail = true
+	registry.setFail(true)
 	if _, err := signer.Verify(ctx, token, "user-1", 100, 100, now); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
 		t.Fatalf("verification outage error = %v", err)
 	}
@@ -155,13 +197,124 @@ func TestRegistryOutageFailsClosed(t *testing.T) {
 	}
 }
 
-func TestConcurrentRotationPublishesOneReplacement(t *testing.T) {
+func TestReadinessAndSigningNeverPublish(t *testing.T) {
+	ctx := context.Background()
+	registry := newMemoryRegistry()
+	signer, err := NewSigner(registry, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := signer.Ready(ctx); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+			t.Fatalf("unregistered readiness error = %v", err)
+		}
+		if _, _, err := signer.New(ctx, 100, "epoch", 1, "user-1", time.Now(), time.Minute); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+			t.Fatalf("unregistered issuance error = %v", err)
+		}
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.attempts) != 0 {
+		t.Fatalf("requests published %d keys", len(registry.attempts))
+	}
+}
+
+func TestExpiredKeyFailsClosedWithoutRequestTriggeredRotation(t *testing.T) {
+	ctx := context.Background()
+	registry := newMemoryRegistry()
+	signer, err := NewSigner(registry, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := signer.generateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Publish(ctx, key.id, key.public, time.Hour+time.Minute+keyRetentionGrace); err != nil {
+		t.Fatal(err)
+	}
+	key.signUntil = time.Now().Add(-time.Second)
+	signer.current = key
+	if err := signer.Ready(ctx); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+		t.Fatalf("expired readiness error = %v", err)
+	}
+	if _, _, err := signer.New(ctx, 100, "epoch", 1, "user-1", time.Now(), time.Minute); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+		t.Fatalf("expired issuance error = %v", err)
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.attempts) != 1 {
+		t.Fatalf("expired requests triggered %d publications, want only test setup", len(registry.attempts))
+	}
+}
+
+func TestRegistrationRetriesSameKeyAndRecovers(t *testing.T) {
+	registry := newMemoryRegistry()
+	registry.setFail(true)
+	signer, err := NewSigner(registry, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); signer.Run(ctx, 50*time.Millisecond, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		registry.mu.Lock()
+		attempts := append([]string(nil), registry.attempts...)
+		registry.mu.Unlock()
+		if len(attempts) >= 2 {
+			if attempts[0] != attempts[1] {
+				t.Fatalf("registration retry changed key ID: %v", attempts)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !time.Now().Before(deadline) {
+		t.Fatal("registration was not retried")
+	}
+	if _, _, err := signer.New(context.Background(), 100, "epoch", 1, "user-1", time.Now(), time.Minute); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+		t.Fatalf("issuance during registration failure = %v", err)
+	}
+	registry.setFail(false)
+	waitReady(t, signer)
+	if _, _, err := signer.New(context.Background(), 100, "epoch", 1, "user-1", time.Now(), time.Minute); err != nil {
+		t.Fatalf("issuance after recovery: %v", err)
+	}
+}
+
+func TestBackgroundRestoresLostActivePublicKey(t *testing.T) {
+	registry := newMemoryRegistry()
+	signer := testSigner(t, registry)
+	keyID := signer.currentKey().id
+	registry.mu.Lock()
+	delete(registry.keys, keyID)
+	registry.mu.Unlock()
+	if err := signer.Ready(context.Background()); apierr.As(err).Code != "TICKET_KEY_UNAVAILABLE" {
+		t.Fatalf("readiness after key loss = %v", err)
+	}
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if signer.Ready(context.Background()) == nil {
+			registry.mu.Lock()
+			attempts := append([]string(nil), registry.attempts...)
+			registry.mu.Unlock()
+			if len(attempts) != 2 || attempts[1] != keyID {
+				t.Fatalf("re-registration used a different key: %v", attempts)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("background worker did not restore the active public key")
+}
+
+func TestConcurrentIssuanceUsesOnePublishedKey(t *testing.T) {
 	ctx := context.Background()
 	registry := newMemoryRegistry()
 	signer := testSigner(t, registry)
-	signer.mu.Lock()
-	signer.current.signUntil = time.Now().Add(-time.Second)
-	signer.mu.Unlock()
 	const issuers = 32
 	ids := make(chan string, issuers)
 	errs := make(chan error, issuers)
@@ -194,7 +347,7 @@ func TestConcurrentRotationPublishesOneReplacement(t *testing.T) {
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
-	if len(registry.keys) != 2 {
-		t.Fatalf("rotation published %d keys, want initial and one replacement", len(registry.keys))
+	if len(registry.keys) != 1 {
+		t.Fatalf("issuance published %d keys, want only background key", len(registry.keys))
 	}
 }

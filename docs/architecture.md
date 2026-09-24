@@ -8,11 +8,11 @@
 >
 > 갱신 시점: 구성 요소의 책임, 권위 있는 데이터, 요청 흐름 또는 장애 동작이 바뀔 때
 
-이 문서는 컴포넌트 사이의 관계와 장애 경계를 설명한다. 제품 목표와 향후 범위는 [blueprint](./blueprint.md), 키 설계 결정은 [ADR 0001](./adr/0001-ephemeral-ticket-signing-keys.md), 정확한 HTTP 형식은 [API 계약](./API.md), 실제 route/status는 [HTTP 서버](../internal/httpapi/server.go), 테이블 제약은 [migration](../migrations/001_init.sql), 측정·검증 증거는 [보고서](./reports/TEST-REPORT.md)가 소유한다. 문서와 코드가 다르면 코드를 확인한다.
+이 문서는 컴포넌트 사이의 관계와 장애 경계를 설명한다. 제품 목표와 향후 범위는 [blueprint](./blueprint.md), 키 설계 결정은 [ADR 0001](./adr/0001-ephemeral-ticket-signing-keys.md)과 [ADR 0002](./adr/0002-background-ticket-key-registration.md), 정확한 HTTP 형식은 [API 계약](./API.md), 실제 route/status는 [HTTP 서버](../internal/httpapi/server.go), 테이블 제약은 [migration](../migrations/001_init.sql), 측정·검증 증거는 [보고서](./reports/TEST-REPORT.md)가 소유한다. 문서와 코드가 다르면 코드를 확인한다.
 
 ## 실행 구성과 책임
 
-`ticketing serve`는 하나의 Go 프로세스 안에서 HTTP API와 세 가지 백그라운드 작업을 함께 실행한다. 로컬 [Compose](../compose.yaml)는 대기열 Redis, 별도 티켓 공개키 Redis, MySQL을 실행하며 Go 서비스는 [README](../README.md)의 명령으로 별도 시작한다. 현재 Compose에는 로드밸런서, Redis/MySQL 복제본, 실제 결제 시스템이 없다.
+`ticketing serve`는 하나의 Go 프로세스 안에서 HTTP API와 네 가지 백그라운드 작업(입장 scheduler, hold 만료 회수, 좌석 cache 갱신, 티켓 키 등록·교체)을 함께 실행한다. 로컬 [Compose](../compose.yaml)는 대기열 Redis, 별도 티켓 공개키 Redis, MySQL을 실행하며 Go 서비스는 [README](../README.md)의 명령으로 별도 시작한다. 현재 Compose에는 로드밸런서, Redis/MySQL 복제본, 실제 결제 시스템이 없다.
 
 ```mermaid
 flowchart LR
@@ -72,13 +72,13 @@ Redis와 MySQL 사이에 분산 트랜잭션은 없다. Redis에서 입장 권�
 
 ## 시작·장애·복구 경계
 
-`migrate`는 MySQL schema/seed를 적용하고, `init-state`는 대기열 Redis installation marker와 이벤트 control을 명시적으로 초기화한다. 일반 `serve`는 이를 자동 생성하지 않으며, 인스턴스의 Ed25519 공개키를 별도 키 Redis에 등록한 뒤 대기열 Redis marker/control·키 조회·MySQL 접속을 확인하고 시작한다. `/livez`는 프로세스 응답, `/readyz`는 대기열 Redis ping·installation 상태·현재 공개키 조회·MySQL ping을 확인한다. `/readyz`가 과거 공개키 전체의 보존, 좌석 캐시의 최신성이나 scheduler lease 보유까지 보증하지는 않는다. 종료 시 HTTP server를 제한 시간 안에 shutdown하고 백그라운드 작업을 취소한다.
+`migrate`는 MySQL schema/seed를 적용하고, `init-state`는 대기열 Redis installation marker와 이벤트 control을 명시적으로 초기화한다. 일반 `serve`는 이를 자동 생성하지 않는다. 대기열 Redis marker/control과 MySQL 접속을 확인한 뒤 HTTP를 시작하고, 별도 백그라운드 작업이 인스턴스의 Ed25519 공개키를 키 Redis에 등록·교체한다. 등록 실패에도 프로세스는 유지되며 제한 시간·백오프를 둔 재시도를 계속한다. `/livez`는 프로세스 응답, `/readyz`는 대기열 Redis ping·installation 상태·현재 활성 공개키 조회·MySQL ping을 **읽기 전용**으로 확인한다. 등록 전에는 `/readyz`가 503이고, 서명이 필요한 발급·갱신도 503이다. `/readyz`가 과거 공개키 전체의 보존, 좌석 캐시의 최신성이나 scheduler lease 보유까지 보증하지는 않는다. 종료 시 HTTP server를 제한 시간 안에 shutdown하고 백그라운드 작업을 취소한다.
 
 | 장애 | 현재 동작과 한계 |
 |---|---|
 | MySQL 불가 | 신규 direct permit 대신 queue ticket을 발급하고 scheduler가 grant를 멈춘다. 좌석 변경은 실패한다. MySQL 복구 후 worker가 다시 진행할 수 있으나 자동 failover는 구현하지 않았다. |
 | Redis 접속 불가 또는 권위 상태 유실 의심 | ticket/permit 판정과 새 입장을 안전하게 진행할 수 없다. API는 오류를 반환하고 핵심 control/epoch 불일치 시 `RECOVERING`으로 닫는다. 빈 정상 상태로 자동 재초기화하지 않는다. |
-| 키 Redis 접속 불가 또는 공개키 유실 | 대기표 발급·검증과 readiness가 실패한다. 기존 공개키가 유실되면 해당 미만료 대기표도 검증할 수 없다. 단순 프로세스 재시작은 키 Redis의 과거 공개키를 지우지 않는다. |
+| 키 Redis 접속 불가 또는 공개키 유실 | 서명이 필요한 대기표 발급·갱신과 검증·readiness가 503으로 실패하지만, 서명이 필요 없는 직접 입장은 가능하다. 백그라운드 작업은 등록을 계속 재시도하고 현재 키의 공개키 유실은 재등록한다. 이미 교체한 키나 이전 인스턴스의 공개키가 유실되면 해당 미만료 대기표는 복구할 수 없다. 단순 프로세스 재시작은 키 Redis의 과거 공개키를 지우지 않는다. |
 | scheduler 또는 만료 작업 중단 | 새 grant나 반환이 지연돼 처리량이 줄 수 있다. 이미 Redis/MySQL에 기록된 권한·주문은 프로세스 메모리에만 있지 않으며, 재시작 작업이 남은 상태를 다시 조사한다. |
 | 좌석 캐시 지연 | 오래된 snapshot을 표시할 수 있지만 hold·판매 권위는 MySQL에 남는다. |
 

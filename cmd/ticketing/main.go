@@ -91,20 +91,18 @@ func run(logger *slog.Logger) error {
 	case "serve":
 		keyClient := redis.NewClient(&redis.Options{Addr: cfg.TicketKeyRedisAddr, Password: cfg.TicketKeyRedisPassword, Protocol: 2})
 		defer keyClient.Close()
-		keyCtx, cancel := context.WithTimeout(ctx, cfg.DependencyTimeout)
-		signer, err := ticket.NewSigner(keyCtx, keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
-		cancel()
+		signer, err := ticket.NewSigner(keyredis.New(keyClient), cfg.TicketKeyLifetime, cfg.TicketTTL)
 		if err != nil {
 			return fmt.Errorf("initialize ticket signing: %w", err)
 		}
 		queueStore = queue.NewStore(redisClient, signer, cfg)
-		return serve(ctx, cfg, redisClient, queueStore, logger)
+		return serve(ctx, cfg, redisClient, queueStore, signer, logger)
 	default:
 		return fmt.Errorf("unknown command %q; use serve, init-state, or migrate", command)
 	}
 }
 
-func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, queueStore *queue.Store, logger *slog.Logger) error {
+func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, queueStore *queue.Store, signer *ticket.Signer, logger *slog.Logger) error {
 	startupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := redisClient.Ping(startupCtx).Err(); err != nil {
@@ -112,9 +110,6 @@ func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, qu
 	}
 	if err := queueStore.CheckInstallation(startupCtx); err != nil {
 		return fmt.Errorf("check redis state (run init-state explicitly): %w", err)
-	}
-	if err := queueStore.CheckSigning(startupCtx); err != nil {
-		return fmt.Errorf("check ticket verification key: %w", err)
 	}
 	db, err := database.Open(cfg.MySQLDSN)
 	if err != nil {
@@ -133,6 +128,13 @@ func serve(ctx context.Context, cfg config.Config, redisClient *redis.Client, qu
 	worker := queue.NewWorker(queueStore, cfg, workerID, db.PingContext, logger)
 	backgroundCtx, stopBackground := context.WithCancel(ctx)
 	defer stopBackground()
+	go signer.Run(backgroundCtx, cfg.DependencyTimeout, func(err error) {
+		if err != nil {
+			logger.Warn("ticket_key_registration_retrying", "error", err)
+		} else {
+			logger.Info("ticket_key_registration_recovered")
+		}
+	})
 	go worker.Run(backgroundCtx)
 	go seatCache.Run(backgroundCtx)
 	go runHoldReaper(backgroundCtx, bookingStore, cfg.HoldReaperInterval, logger)
