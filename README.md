@@ -30,7 +30,7 @@ Invoke-RestMethod http://127.0.0.1:8080/readyz
 
 `migrate` and `init-state` are explicit setup steps. A normal `serve` does not create or recover Redis authority state automatically; it refuses to start if the installation marker is missing.
 
-Defaults are in [config.go](./internal/config/config.go), and development examples are in [.env.example](./.env.example). The application does not load `.env` automatically, so pass any required values through the process environment. The default `TICKET_HMAC_KEY` is only a local development fixture.
+Defaults are in [config.go](./internal/config/config.go), and development examples are in [.env.example](./.env.example). See the [configuration reference (Korean)](./docs/configuration.md) for all settings and their lifecycle. The application does not load `.env` automatically, so pass any required values through the process environment. The default `TICKET_HMAC_KEY` is only a local development fixture.
 
 To reduce request logging:
 

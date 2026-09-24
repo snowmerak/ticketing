@@ -30,7 +30,7 @@ Invoke-RestMethod http://127.0.0.1:8080/readyz
 
 `migrate`와 `init-state`는 명시적 절차입니다. 일반 `serve`는 Redis 권한 상태를 자동 생성하거나 복구하지 않으며 installation marker가 없으면 시작을 거부합니다.
 
-기본 설정은 [config.go](./internal/config/config.go)에 있고, 개발용 예시는 [.env.example](./.env.example)에 있습니다. 이 애플리케이션은 `.env`를 자동으로 읽지 않으므로 필요한 값은 프로세스 환경 변수로 주입해야 합니다. `TICKET_HMAC_KEY` 기본값은 오직 로컬 개발 fixture입니다.
+기본 설정은 [config.go](./internal/config/config.go)에 있고, 개발용 예시는 [.env.example](./.env.example)에 있습니다. 전체 설정과 적용 시점은 [설정 참조 문서](./docs/configuration.md)를 보세요. 이 애플리케이션은 `.env`를 자동으로 읽지 않으므로 필요한 값은 프로세스 환경 변수로 주입해야 합니다. `TICKET_HMAC_KEY` 기본값은 오직 로컬 개발 fixture입니다.
 
 요청 로그를 줄이려면 다음처럼 실행할 수 있습니다.
 
