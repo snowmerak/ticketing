@@ -87,6 +87,16 @@ go run ./cmd/loadtest -profile hold-hot -warmup 2s -duration 10s -concurrency 8 
 
 측정 결과와 해석 한계는 [BENCHMARK-REPORT.md](./docs/reports/BENCHMARK-REPORT.md)에 있습니다.
 
+Docker k6로 단일 노트북에서 정상 경로를 영역별로 짧게 측정하려면 Compose와 migration 준비 후 다음을 실행합니다. 실행기는 별도 synthetic event와 Docker API/k6 컨테이너를 사용하고 종료 시 해당 event만 정리합니다. 원시 요약은 버전 관리하지 않는 `benchmark-results/`에 남습니다.
+
+```powershell
+docker compose up -d --wait
+go run ./cmd/ticketing migrate
+powershell -File .\bench\run.ps1 -VUs 4 -Iterations 100 -WarmupIterations 5
+```
+
+이 측정은 [k6 workload](./bench/k6.js)의 입장·대기 ticket/heartbeat·좌석 조회·hold/cancel·확정·전체 구매를 분리해 보지만, 단기 반복 속도를 운영 capacity로 해석하지 않습니다. 최신 관찰치는 위 보고서의 “Docker k6 분리 측정” 절에 있습니다.
+
 ## 상태와 복구
 
 - Redis는 `noeviction`과 AOF를 사용합니다. epoch/meta/spent/permit 손실이 의심되면 자동 DIRECT로 우회하지 않고 `QUEUE_RECOVERING`으로 닫힙니다.
