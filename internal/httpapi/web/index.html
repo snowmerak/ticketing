@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ticketing V1</title>
+  <style>
+    body { max-width: 820px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.5 system-ui, sans-serif; }
+    input, button, select { padding: .55rem; margin: .2rem; }
+    pre { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; border-radius: .5rem; }
+    .seat { display: inline-block; margin: .2rem; }
+  </style>
+</head>
+<body>
+  <h1>Ticketing V1 개발 클라이언트</h1>
+  <p>개발 인증 fixture입니다. 운영 인증으로 사용하지 마세요.</p>
+  <label>사용자 <input id="subject" value="user-1"></label>
+  <label>이벤트 <input id="event" value="100"></label>
+  <button id="enter">입장/대기</button>
+  <button id="seats">좌석 새로고침</button>
+  <div id="seatList"></div>
+  <pre id="status">준비됨</pre>
+  <script>
+    const state = {
+      get subject() { return document.querySelector('#subject').value; },
+      get event() { return document.querySelector('#event').value; },
+      ticket: localStorage.getItem('ticket'), booking: localStorage.getItem('booking'), timer: null
+    };
+    const out = value => document.querySelector('#status').textContent = JSON.stringify(value, null, 2);
+    async function api(path, options = {}) {
+      options.headers = Object.assign({'Content-Type':'application/json','X-Subject-ID':state.subject}, options.headers || {});
+      const response = await fetch(path, options); const body = await response.json();
+      if (!response.ok) throw body; return body;
+    }
+    async function enter() {
+      const body = state.ticket ? {ticket:state.ticket} : {};
+      const result = await api(`/events/${state.event}/entry`, {method:'POST', body:JSON.stringify(body)});
+      if (result.kind === 'DIRECT') setBooking(result.booking.booking_id);
+      else if (result.heartbeat) handleHeartbeat(result.heartbeat);
+      else { state.ticket = result.ticket; localStorage.setItem('ticket', state.ticket); schedulePoll(0); }
+      out(result);
+    }
+    function schedulePoll(delay = 3000) {
+      clearTimeout(state.timer); state.timer = setTimeout(poll, delay * (.8 + Math.random() * .4));
+    }
+    async function poll() {
+      try {
+        const result = await api('/queue/heartbeat', {method:'POST', body:JSON.stringify({event_id:state.event,ticket:state.ticket})});
+        handleHeartbeat(result); out(result);
+      } catch (error) { out(error); schedulePoll(5000); }
+    }
+    async function handleHeartbeat(result) {
+      state.ticket = result.ticket; localStorage.setItem('ticket', state.ticket);
+      if (result.status === 'GRANTED') {
+        const booking = await api('/queue/redeem', {method:'POST', body:JSON.stringify({event_id:state.event,ticket:state.ticket,grant_id:result.grant_id})});
+        setBooking(booking.booking_id); out(booking);
+      } else schedulePoll(result.next_poll_ms || 3000);
+    }
+    function setBooking(value) { state.booking = value; localStorage.setItem('booking', value); clearTimeout(state.timer); }
+    async function seats() {
+      const result = await api(`/events/${state.event}/seat-map`, {headers:{'X-Booking-ID':state.booking}}); out(result);
+      const root = document.querySelector('#seatList'); root.innerHTML = '';
+      result.seats.forEach(seat => {
+        const button = document.createElement('button'); button.className='seat'; button.disabled=seat.state!=='AVAILABLE';
+        button.textContent=`${seat.display_alias} (${seat.state})`; button.onclick=()=>hold(seat.seat_id); root.appendChild(button);
+      });
+    }
+    async function hold(seatID) {
+      const result = await api(`/events/${state.event}/holds`, {method:'POST', headers:{'Idempotency-Key':crypto.randomUUID()}, body:JSON.stringify({booking_id:state.booking,mode:'specified',seat_ids:[seatID],quantity:1})}); out(result);
+      if (confirm(`좌석 ${result.display_alias}을 확정할까요?`)) {
+        const order = await api(`/holds/${result.hold_id}/confirm`, {method:'POST',body:JSON.stringify({booking_id:state.booking,payment_result_id:crypto.randomUUID()})}); out(order);
+      }
+    }
+    document.querySelector('#enter').onclick=()=>enter().catch(out);
+    document.querySelector('#seats').onclick=()=>seats().catch(out);
+  </script>
+</body>
+</html>
