@@ -54,6 +54,14 @@ go run ./cmd/ticketing migrate
 go test -count=1 -tags=integration ./...
 ```
 
+실제 바이너리와 HTTP 포트, admission worker를 포함한 전체 API E2E는 별도 명령으로 실행합니다. 테스트가 임의의 전용 이벤트를 만들고 종료 시 그 이벤트의 MySQL/Redis 데이터만 정리합니다. 기존 이벤트 100/200의 좌석·주문은 사용하지 않습니다.
+
+```powershell
+go test -tags=e2e -count=1 -v ./e2e
+```
+
+이 테스트는 DIRECT 입장으로 capacity 점유 → 동일 사용자의 복수 QUEUE 대기표 → 서버 프로세스 재시작 → heartbeat/grant/redeem → 좌석 조회·선점·취소·자동배정·확정 → 구매 후 새 대기표와 새 booking permit 발급 → 다른 permit으로도 추가 구매 거절을 검증합니다. 브라우저 JavaScript 실행과 실제 결제는 포함하지 않습니다.
+
 Windows 호스트에 C 컴파일러가 없을 때도 Linux 컨테이너에서 race detector를 실행할 수 있습니다.
 
 ```powershell

@@ -10,7 +10,7 @@
 
 | 항목 | 값 |
 |---|---|
-| 기준 revision | `f248931` 기반 working tree(본 구현 변경 미커밋) |
+| 기준 revision | `11a9a05` 기반 working tree(이번 E2E 테스트 추가분 포함) |
 | Host | Windows 11 Home 10.0.26200 |
 | CPU / RAM | AMD Ryzen 7 8845HS, 16 logical CPU / 27.8 GiB |
 | Go | 1.27.1 windows/amd64 |
@@ -31,6 +31,7 @@
 | `go run ./cmd/ticketing migrate` | PASS, clean MySQL 8.4.6에 schema/seed 적용 |
 | `go run ./cmd/ticketing init-state` | PASS, installation marker와 event control 생성 |
 | HTTP direct → seat map → hold → confirm smoke | PASS |
+| `go test -tags=e2e -count=1 -v ./e2e` | PASS, 실제 빌드 바이너리·HTTP 포트·Redis/MySQL·admission worker를 통과하는 전체 구매 경로 |
 
 Windows host의 직접 `go test -race`는 GCC 부재로 실행할 수 없었습니다. 동일 working tree를 공식 `golang:1.27.1-bookworm` 컨테이너에서 실행해 단위·통합 race 결과를 모두 PASS로 대체했습니다.
 
@@ -52,13 +53,14 @@ Windows host의 직접 `go test -race`는 GCC 부재로 실행할 수 없었습�
 | F-01 | PASS(신규 entry 범위) | Redis 접속 불가 시 503 `REDIS_UNAVAILABLE`, booking permit 미발급 |
 | F-02 | PASS(신규 entry 범위) | MySQL 접속 불가 시 DIRECT permit 대신 Redis 대기표 발급 |
 | F-03 | PASS(핵심 상태 유실 범위) | QUEUE control만 남고 active epoch가 없으면 `QUEUE_RECOVERING`으로 fail-closed 및 latch |
+| API E2E 재시작 | PASS | DIRECT 점유 → 복수 QUEUE ticket → 서버 프로세스 재시작 → 기존 ticket으로 grant/redeem → 좌석 hold/cancel/auto/confirm → 구매 후 새 ticket/permit에서도 추가 구매 거절; 주문 1건·SOLD 1석을 DB에서 확인하고 전용 event 데이터 정리 |
 
 추가로 token tamper/subject/event/expiry/seq 상한, Redis MSB bit order·page 경계, READY OR와 spent/reserved 제거, 설정 관계를 단위 테스트로 확인했습니다. grant redeem replay가 같은 booking ID를 반환하는 것도 실제 Redis에서 확인했습니다.
 
 ## NOT RUN과 경계
 
 - Q/A/S 그룹 중 위 표와 단위 테스트 설명에 직접 대응하지 않는 개별 ID는 아직 ID별 독립 증거가 없으므로 `NOT RUN`입니다.
-- 위 F-01~F-03의 좁은 entry/상태 유실 범위를 제외한 process kill, COMMIT 응답 유실, worker kill/restart 자동 harness와 F-04~F-07은 `NOT RUN`입니다.
+- 전체 API E2E에서 서버 프로세스 재시작 후 queue 진행은 검증했습니다. Redis/MySQL process kill, COMMIT 응답 유실, 독립 worker 장애 주입과 F-04~F-07의 개별 수용 조건은 `NOT RUN`입니다.
 - 복수 API 프로세스의 장시간 lease handoff/soak는 `NOT RUN`입니다.
 - 실제 PG, 운영 인증, Redis failover는 V1 범위 밖이며 테스트하지 않았습니다.
 - 통합 테스트는 실제 dependency가 없으면 skip하지 않고 실패하도록 작성했습니다.
